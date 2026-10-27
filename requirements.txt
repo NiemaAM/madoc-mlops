@@ -10,4 +10,5 @@ augraphy==8.2.6
 opencv-python==4.12.0.88
 nvidia-ml-py==13.615.71
 psutil==7.2.2
+tensorboard==2.20.0   # ketos --logger tensorboard: the metrics, read live by mlops/tb_bridge.py
 pytest==8.4.2

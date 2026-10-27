@@ -7,6 +7,7 @@ checkpoint is exported to .mlmodel and registered in W&B as a new version of the
 """
 
 import shutil
+import sys
 from importlib.metadata import PackageNotFoundError, version as package_version
 
 from mlops import datasets, db, release
@@ -15,17 +16,28 @@ from mlops.config import params, path
 from mlops.kraken_output import best_checkpoint, stage, train_metrics
 from mlops.process import run
 from mlops.resources import free_gpu, gpu_name
+from mlops.tb_bridge import TensorBoardBridge
+
+
+def ketos_program():
+    """ketos with a TensorBoard logger (mlops/ketos_logged.py: kraken 7.0.2 ignores --logger); plain ketos when
+    kraken is not installed (the tests, with their fake ketos)."""
+    try:
+        import kraken.train  # noqa: F401
+        return [sys.executable, "-m", "mlops.ketos_logged"]
+    except ImportError:
+        return ["ketos"]
 
 
 def ketos_command(task, settings, base, train_list, val_list, out):
     """The ketos command (the options of the previous src/blla_train.py and src/htr_train.py)."""
     device = ["-d", params()["device"], "-s", params()["seed"]]
     if task == "htr":
-        cmd = ["ketos", *device, "train", "--load", base, "--resize", settings["resize"], "--output", out,
+        cmd = [*ketos_program(), *device, "train", "--load", base, "--resize", settings["resize"], "--output", out,
                "--format-type", "page", "--training-data", train_list, "--evaluation-data", val_list,
                "--epochs", settings["epochs"], "--batch-size", settings["batch_size"], "--lag", settings["lag"]]
     else:
-        cmd = ["ketos", *device, "segtrain", "--load", base, "--resize", settings["resize"], "--output", out,
+        cmd = [*ketos_program(), *device, "segtrain", "--load", base, "--resize", settings["resize"], "--output", out,
                "--format-type", "xml", "--training-data", train_list, "--evaluation-data", val_list,
                "--epochs", settings["epochs"]]
     return [str(c) for c in cmd + list(settings.get("extra_args") or [])]
@@ -74,22 +86,30 @@ def train(conn, job, log, should_stop, set_wandb_url):
             run_.use_artifact(f'{wandb_settings["entity"]}/{wandb_settings["project"][task]}/{base["card"]["artifact"]}')
         except Exception as e:
             log(f"W&B lineage skipped: {e}")
-    current, last = {"stage": None}, {}
+    printed = {}   # the metrics of the progress bar of ketos, printed once per epoch
 
     def on_line(line):
-        number = stage(line)
-        if number is not None:
-            current["stage"] = number
         metrics = train_metrics(task, line)
-        if metrics:
-            if current["stage"] is not None:
-                metrics["epoch"] = current["stage"]
-            last.update(metrics)
-            wandb.log(metrics)
+        printed.update(metrics)
+        number = stage(line)
+        if metrics and number is not None and not bridge.sent:
+            # no TensorBoard values (yet): the end-of-epoch numbers of the progress bar, so W&B has curves anyway
+            wandb.log({**{f"epoch_end/{k}": v for k, v in metrics.items()}, "epoch_end/epoch": number})
 
+    log_dir = out / "tensorboard"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    bridge = TensorBoardBridge(log_dir, log=log).start()
+    wandb.define_metric("epoch_end/epoch")
+    wandb.define_metric("epoch_end/*", step_metric="epoch_end/epoch")
     try:
-        run(ketos_command(task, settings, base["path"], train_list, val_list, out / "checkpoints"), log, should_stop,
-            on_line)
+        try:
+            # COLUMNS: the progress bar printed on one line (80 columns cut "val_bl_f1: 0.973" over two lines)
+            run(ketos_command(task, settings, base["path"], train_list, val_list, out / "checkpoints"), log,
+                should_stop, on_line, env={"COLUMNS": "400", "MLOPS_TB_DIR": str(log_dir)})
+        finally:
+            bridge.stop()
+        last = {**printed, **bridge.latest}
+        log(f"W&B: {len(bridge.sent)} metrics followed ({', '.join(sorted(bridge.sent)) or 'none'})")
         checkpoint, score = best_checkpoint(out / "checkpoints")
         if checkpoint is None:
             raise RuntimeError("ketos wrote no checkpoint")
@@ -97,8 +117,7 @@ def train(conn, job, log, should_stop, set_wandb_url):
         run(["ketos", "convert", "--weights-format", "coreml", "-o", model_path, checkpoint], log, should_stop)
         artifact = wandb.Artifact(wandb_settings["artifact"][task], type=f"kraken-{task}-model",
                                   metadata={"task": task, "dataset_version": version["digest"],
-                                            "pages": version["counts"], "best_checkpoint_score": score,
-                                            **{f"val_{k}" if not k.startswith("val") else k: v for k, v in last.items()}})
+                                            "pages": version["counts"], "best_checkpoint_score": score, **last})
         artifact.add_file(str(model_path), name=f"{task}.mlmodel")
         logged = run_.log_artifact(artifact, aliases=["candidate", f'data-{version["digest"]}'])
         try:

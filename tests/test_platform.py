@@ -2,6 +2,7 @@
 anywhere. No GPU, no kraken, no W&B account: tests/fakes stand for ketos and kraken, W&B is offline."""
 
 import json
+import sys
 import subprocess
 import threading
 from pathlib import Path
@@ -219,6 +220,8 @@ def test_whole_flow_with_the_worker(env, madoc_remote, monkeypatch):
         assert not upload.exists()                                                         # ingested, removed
         models = db.all_rows(conn, "SELECT * FROM models ORDER BY id")
         assert [m["task"] for m in models] == ["htr", "blla"] and all(Path(m["path"]).is_file() for m in models)
+        # the metrics came live from the TensorBoard files of ketos (not only from its final progress bar)
+        assert models[1]["val_metrics"]["val_bl_f1"] == pytest.approx(0.83) and "epoch" in models[1]["val_metrics"]
         for model in models:
             jobs.enqueue(conn, "evaluate", model["task"], model_id=model["id"])
         worker.main(once=True)
@@ -247,3 +250,53 @@ def test_the_app_builds(env):
     assert ui.build_app() is not None
     assert [row[0] for row in ui.dataset_table()] == ["train", "val", "test"]
     assert "CPU" in ui.server_html()
+
+
+def test_ketos_metrics_reach_wandb_through_tensorboard(tmp_path, monkeypatch):
+    """ketos run by the worker prints its progress bar only at the end: the metrics are read from its TensorBoard
+    files while it trains."""
+    pytest.importorskip("tensorboard")
+    import os
+    import subprocess
+    import wandb
+    from conftest import FAKES
+    from mlops.tb_bridge import STEP, TensorBoardBridge
+    monkeypatch.setenv("WANDB_MODE", "offline")
+    monkeypatch.setenv("WANDB_SILENT", "true")
+    monkeypatch.setenv("WANDB_DIR", str(tmp_path))
+    logged = []
+    log_dir = tmp_path / "tb"
+    log_dir.mkdir()
+    run = wandb.init(project="test")
+    monkeypatch.setattr(wandb, "log", lambda values: logged.append(values))
+    bridge = TensorBoardBridge(log_dir, interval=0.2, log=lambda *_: None).start()
+    subprocess.run([str(FAKES / "ketos"), "segtrain", "--output", str(tmp_path / "ck")],
+                   check=True, capture_output=True, env={**os.environ, "MLOPS_TB_DIR": str(log_dir)})
+    bridge.stop()
+    run.finish()
+    assert [row[STEP] for row in logged] == sorted(row[STEP] for row in logged)        # in the order of the steps
+    assert {row[STEP] for row in logged} == {10, 20, 30}
+    assert bridge.latest["val_bl_f1"] == pytest.approx(0.83) and bridge.latest["epoch"] == 2
+    assert bridge.poll() == 0                                                          # nothing sent twice
+
+
+def test_ketos_gets_a_tensorboard_logger(tmp_path, monkeypatch):
+    """kraken 7.0.2 ignores "ketos --logger": mlops.ketos_logged gives the trainer its logger."""
+    package = tmp_path / "kraken"
+    (package / "train").mkdir(parents=True)
+    (package / "ketos").mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "train" / "__init__.py").write_text("from kraken.train.utils import KrakenTrainer\n")
+    (package / "train" / "utils.py").write_text(
+        "made = []\nclass KrakenTrainer:\n    def __init__(self, *args, **kwargs):\n        made.append(kwargs)\n")
+    (package / "ketos" / "__init__.py").write_text(
+        "def cli():\n    from kraken.train import KrakenTrainer\n    KrakenTrainer(max_epochs=-1)\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    for name in [m for m in sys.modules if m == "kraken" or m.startswith("kraken.")]:
+        monkeypatch.delitem(sys.modules, name)
+    monkeypatch.setenv("MLOPS_TB_DIR", str(tmp_path / "tb"))
+    from mlops import ketos_logged
+    ketos_logged.main()
+    from kraken.train import utils
+    assert utils.made == [{"max_epochs": -1, "pl_logger": "tensorboard", "log_dir": str(tmp_path / "tb"),
+                           "log_every_n_steps": ketos_logged.LOG_EVERY_N_STEPS}]
