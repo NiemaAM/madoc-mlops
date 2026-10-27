@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+"""A stand-in for kraken in the tests: "reads" a page by copying its transcription (in kraken's visual order).
+A model of the runs folder (a candidate) reads every line; a production model loses the last line and
+the last word of every line."""
+import pathlib, re, sys
+from bidi.algorithm import get_display
+a = sys.argv[1:]
+pairs, models = [], []
+i = 0
+while i < len(a):
+    if a[i] == "-i" and i + 2 < len(a) + 1 and not a[i + 1].endswith(".mlmodel") and i + 2 < len(a):
+        pairs.append((pathlib.Path(a[i + 1]), pathlib.Path(a[i + 2]))); i += 3; continue
+    if a[i] in ("-m", "-i") and a[i + 1].endswith(".mlmodel"):
+        models.append(a[i + 1])
+    i += 1
+good = "/runs/" in models[0]   # the model being evaluated: segmentation first, else recognition
+for source, out in pairs:
+    xml = source if source.suffix == ".xml" else source.with_suffix(".xml")
+    lines = re.findall(r"<Unicode>(.*?)</Unicode>", xml.read_text(encoding="utf-8"))
+    if not good:
+        lines = [" ".join(l.split()[:-1]) for l in lines[:-1]]
+    out.write_text("\n".join(get_display(l) for l in lines), encoding="utf-8")

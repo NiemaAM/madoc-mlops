@@ -1,0 +1,94 @@
+# The MLOps platform: database, control app, worker. See README.md.
+#   docker compose up -d --build        (from this folder; secrets in .env)
+name: madoc-mlops
+
+x-image: &image
+  build: .
+  image: madoc-mlops:latest
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: mlops
+      POSTGRES_USER: mlops
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mlops -d mlops"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [internal]            # no port on the host
+
+  mlops-ui:
+    <<: *image
+    command: ["python", "-m", "mlops.ui"]
+    restart: unless-stopped
+    depends_on:
+      db: {condition: service_healthy}
+    environment:
+      MLOPS_DATABASE_URL: postgresql://mlops:${POSTGRES_PASSWORD}@db:5432/mlops
+      MLOPS_AUTH: ${MLOPS_AUTH:?set MLOPS_AUTH in .env}
+    ports:
+      - "127.0.0.1:7870:7870"       # this machine only; on the tailnet with "tailscale serve" (README)
+    volumes:
+      - data:/data                  # the uploads are written there
+    deploy:
+      resources:
+        reservations:
+          devices:                  # NVML only (GPU usage in the Server tab), no compute
+            - {driver: nvidia, count: all, capabilities: [utility]}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7870/', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks: [internal]
+
+  mlops-worker:
+    <<: *image
+    command: ["python", "-m", "mlops.worker"]
+    restart: unless-stopped
+    depends_on:
+      db: {condition: service_healthy}
+    environment:
+      MLOPS_DATABASE_URL: postgresql://mlops:${POSTGRES_PASSWORD}@db:5432/mlops
+      MLOPS_SECRET: ${MLOPS_SECRET:?set MLOPS_SECRET in .env}
+      WANDB_API_KEY: ${WANDB_API_KEY:?set WANDB_API_KEY in .env}
+      GH_TOKEN: ${GH_TOKEN:?set GH_TOKEN in .env}
+      MLOPS_WORKER_NAME: gpu-worker
+    volumes:
+      - data:/data
+      - runs:/runs
+      - release:/release
+    shm_size: 8gb                   # the data loaders of PyTorch share their batches through /dev/shm
+    deploy:
+      resources:
+        limits:
+          memory: 24g               # a runaway job cannot take the memory of MaDoc
+        reservations:
+          devices:
+            - {driver: nvidia, count: all, capabilities: [gpu]}
+    healthcheck:
+      test: ["CMD", "python", "-m", "mlops.cli", "health", "worker"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 120s
+    stop_grace_period: 60s
+    networks: [internal, madoc-shared]   # madoc-shared: to unload Gemma from MaDoc's Ollama before a job
+
+volumes:
+  db:
+  data:
+  runs:
+  release:
+
+networks:
+  internal: {}
+  madoc-shared:
+    external: true                  # made once: docker network create madoc-shared

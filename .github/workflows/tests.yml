@@ -1,0 +1,30 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest           # GitHub's machine: no data, no GPU, fake ketos / kraken
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: mlops
+          POSTGRES_PASSWORD: mlops
+          POSTGRES_DB: mlops_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U mlops" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      MLOPS_TEST_DATABASE_URL: postgresql://mlops:mlops@localhost:5432/mlops_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+      - run: pip install -r requirements-ci.txt
+      - run: python -m pytest -q

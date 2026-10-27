@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+"""A stand-in for ketos in the tests: writes what the real one writes, instantly."""
+import pathlib, sys
+a = sys.argv[1:]
+while a and a[0] in ("-d", "-s"):
+    a = a[2:]
+cmd = a[0]
+if cmd in ("train", "segtrain"):
+    out = pathlib.Path(a[a.index("--output") + 1]); out.mkdir(parents=True, exist_ok=True)
+    for s in (1, 2, 3):
+        print(f"stage {s}/∞ train_loss_step: 0.{5 - s} val_accuracy: 0.9{s} val_word_accuracy: 0.8{s} val_bl_f1: 0.8{s}")
+        (out / f"checkpoint_{s:02d}-0.9{s}.ckpt").write_text("w")
+elif cmd == "convert":
+    pathlib.Path(a[a.index("-o") + 1]).write_text("model from " + a[-1])
+elif cmd == "test":
+    good = "/runs/" in a[a.index("-m") + 1]
+    print(f"60480\tCharacters\n1651\tErrors\n{97.6 if good else 97.27}%\tCharacter Accuracy\n"
+          f"{88.5 if good else 88.32}%\tWord Accuracy\n798\tInsertions\n316\tDeletions\n537\tSubstitutions\n\n"
+          "Count\tMissed\t%Right\n43353\t484\t98.88%\tArabic\n\nErrors\tCorrect-Generated\n371\t{ SPACE } - {  }")
+elif cmd == "segtest":
+    good = "/runs/" in a[a.index("-m") + 1]
+    print(f"│ Overall │ 0.95 │ 0.93 │ {0.95 if good else 0.94} │")
