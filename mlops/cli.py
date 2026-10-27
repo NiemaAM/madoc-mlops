@@ -4,6 +4,7 @@
     python -m mlops.cli health ui              # healthcheck of the app container (the database answers)
     python -m mlops.cli import /import/train --split train     # import an existing split (copied, then queued)
     python -m mlops.cli jobs                   # the last jobs
+    python -m mlops.cli resplit                # split every group again, balanced (see ingest.resplit)
 """
 
 import argparse
@@ -59,12 +60,17 @@ def main(argv=None):
     i.add_argument("source", help="a folder or a zip visible inside the container")
     i.add_argument("--split", choices=SPLITS, help="put every page in this split (keep an existing split)")
     sub.add_parser("jobs")
+    sub.add_parser("resplit", help="split every group again, balanced by size (before the first training)")
     args = parser.parse_args(argv)
     if args.command == "health":
         return health(args.component)
     db.init_schema()
     if args.command == "import":
         import_folder(args.source, args.split)
+    elif args.command == "resplit":
+        from mlops.ingest import resplit
+        with db.connection() as conn:
+            resplit(conn)
     else:
         list_jobs()
     return 0

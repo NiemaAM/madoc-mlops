@@ -36,15 +36,26 @@ def test_ketos_reports():
 
 
 def test_group_and_split():
-    from mlops.ingest import group_of, split_of
+    from mlops.ingest import assign_groups, group_of
     pattern = r"^(.+?_\d{4})_"
     assert group_of("03010108_1_1_I_2016_162-2-1", pattern) == group_of("03010108_1_1_I_2016_7-2-1", pattern)
     assert group_of("03010108_1_1_I_2016_162-2-1", pattern) != group_of("03010108_1_1_I_2017_162-2-1", pattern)
     assert group_of("other", pattern) != group_of("other2", pattern)                  # no match: its own group
     assert "2016" not in group_of("03010108_1_1_I_2016_1", pattern)                   # a keyed hash, not the name
-    keys = [f"{i:012x}abcd" for i in range(0, 16 ** 12, 16 ** 12 // 1000)]
-    splits = [split_of(k, 0.15, 0.15) for k in keys]
-    assert 100 < splits.count("test") < 200 and 100 < splits.count("val") < 200
+    # few large groups (7 registers, as in birth_certificates_v2): no split is left empty
+    sizes = {"a": 120, "b": 100, "c": 90, "d": 80, "e": 70, "f": 60, "g": 50}
+    splits = assign_groups({}, sizes, 0.15, 0.15)
+    pages = {s: sum(n for g, n in sizes.items() if splits[g] == s) for s in ("train", "val", "test")}
+    assert all(pages.values()) and pages["train"] > pages["val"] and pages["train"] > pages["test"]
+    assert assign_groups({}, sizes, 0.15, 0.15) == splits                              # only depends on the data
+    # many small groups: close to 70 / 15 / 15
+    many = {f"g{i:03d}": 5 + i % 7 for i in range(200)}
+    splits = assign_groups({}, many, 0.15, 0.15)
+    total = sum(many.values())
+    for split, share in (("train", 0.7), ("val", 0.15), ("test", 0.15)):
+        assert abs(sum(n for g, n in many.items() if splits[g] == split) / total - share) < 0.02
+    # later batches fill the split that is short
+    assert set(assign_groups({"train": 70, "val": 15, "test": 0}, {"x": 10}, 0.15, 0.15).values()) == {"test"}
 
 
 def test_gate():
@@ -124,6 +135,18 @@ def test_zip_slip_is_refused(env, tmp_path):
     target.mkdir()
     extract(tmp_path / "evil.zip", target)
     assert (target / "ok" / "page.txt").is_file() and not (tmp_path / "evil.txt").exists()
+
+
+def test_resplit_balances_the_groups(env):
+    from mlops import db
+    from mlops.ingest import resplit
+    with db.connection() as conn:
+        pages = [(f"03010108_1_{r}_I_2016_{a}-1", (r * 30, a * 8, 99)) for r in range(7) for a in range(10 + r)]
+        ingest_zip(conn, env, "v2", pages, force_split="train")                        # everything in train
+        counts = resplit(conn, log=lambda *_: None)
+        assert all(counts.values()) and sum(counts.values()) == len(pages)
+        groups = db.all_rows(conn, "SELECT group_key, count(DISTINCT split) AS n FROM pages GROUP BY group_key")
+        assert all(g["n"] == 1 for g in groups)
 
 
 def test_dataset_versions(env):

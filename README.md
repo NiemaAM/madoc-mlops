@@ -36,7 +36,7 @@ links between them are the shared GPU, the `madoc-shared` network (to unload Gem
 | Step | Details |
 |---|---|
 | Ingest | Every page is checked (image, size, lines, baselines, transcription). It is renamed to an opaque id (start of the SHA-256 of its image): the original file name, which identifies a real record, is only in the private table `page_origins`. This is pseudonymisation, not anonymisation: the images and the texts still show names and dates, so the data stays personal data and stays on this machine. |
-| Split | By group: the pages of the same register and year (from the original file name, `params.yaml: ingest.group_pattern`) land in the same split, decided by a keyed hash. A test page is never a near-copy of a train page; a group keeps its split forever. 70 / 15 / 15. |
+| Split | By group: the pages of the same register and year (from the original file name, `params.yaml: ingest.group_pattern`) land in the same split. A test page is never a near-copy of a train page; a group keeps its split forever. New groups go to the split furthest below its share of the pages (70 / 15 / 15), largest group first, so no split stays empty even with few registers. |
 | Dataset version | When a job starts, the pages and their splits are frozen into a version (`dataset_versions`). A model records the version it was trained on, an evaluation the version of its test pages. |
 | Augmentation | `script/data_augmentation_xml.py` (augraphy), train pages only, made once per version and reused. |
 | Train | Fine-tunes MaDoc's production model with ketos until early stopping; metrics live in W&B; the best checkpoint is exported and registered in W&B (alias `candidate`) and in the database. |
@@ -177,7 +177,21 @@ next to the images). Two choices:
 - **Keep the old split** (to compare with your previous W&B runs): the same with `--split $split` at the end.
 
 The imports are queued: follow them in the **Jobs** tab, then check **Data** (pages and groups per split,
-rejected pages and why). Do not import `train/all`: it holds your old augmented copies, the platform augments by
+rejected pages and why).
+
+Check the **groups** column: a split is only as varied as its groups. With few registers (a handful of
+register-years), validation and test each hold one or two registers: their numbers then say how the model does
+on *those* registers. Adding exports of other registers or years improves the evaluation as much as the training.
+
+To split the whole dataset again (balanced by group size, e.g. after importing with `--split`, or after an older
+version of the platform), **before the first training**:
+
+```bash
+docker compose exec mlops-ui python -m mlops.cli resplit
+```
+
+The dataset versions already made keep their own splits, so models trained before stay traceable, but their
+evaluations are no longer comparable with the new test set. Do not import `train/all`: it holds your old augmented copies, the platform augments by
 itself.
 
 ### 8. The first cycle
@@ -213,6 +227,7 @@ What to watch: in **Compare & release**, the gain on the *old* test pages (the m
 | update the platform | check **Jobs** that nothing is running (a restarted worker marks its job failed), then `git pull && docker compose up -d --build` |
 | stop / start | `docker compose stop` / `docker compose start` (the data stays in the volumes) |
 | backup | `scripts/backup.sh /media/<encrypted-disk>/madoc-mlops-backup` (database dump + pages) |
+| split every group again | `docker compose exec mlops-ui python -m mlops.cli resplit` (before the first training) |
 
 **Backups.** The database and the `data` volume are the only copy of the dataset and of the private table of
 original names. Back them up every night to an encrypted disk:
@@ -259,7 +274,7 @@ MLOPS_TEST_DATABASE_URL=postgresql://mlops:test@127.0.0.1:5433/mlops_test python
 ```
 
 GitHub Actions runs them on every push (`.github/workflows/tests.yml`, with a PostgreSQL service). They cover the
-checks and the pseudonymisation of the ingestion, the split by group, the dataset versions, the job queue and its
+checks and the pseudonymisation of the ingestion, the split by group (balanced, never an empty split), the dataset versions, the job queue and its
 cancellation, the gate and the whole flow (upload → ingest → train → evaluate → pull request) with the worker.
 
 ## Files

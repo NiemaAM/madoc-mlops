@@ -9,8 +9,9 @@ file name, which identifies a real record, is kept only in the private table pag
 transcriptions still show names and dates: the data stays personal data, kept on this machine only.
 
 Split by group (params.yaml: ingest.group_pattern): the pages of the same register and year land in the same
-split, decided by a keyed hash of the group (MLOPS_SECRET), so a test page is never a near-copy of a train page.
-A group already in the dataset keeps its split.
+split, so a test page is never a near-copy of a train page. The new groups are given to the splits by their size,
+to keep 70 / 15 / 15 of the pages (assign_groups); a group already in the dataset keeps its split. The group is
+stored as a keyed hash (MLOPS_SECRET), never as its name.
 """
 
 import hashlib
@@ -41,16 +42,6 @@ def group_of(stem, pattern):
     match = re.match(pattern, stem) if pattern else None
     group = match.group(1) if match else stem
     return hmac.new(secret(), group.encode(), hashlib.sha256).hexdigest()[:16]
-
-
-def split_of(key, val_fraction, test_fraction):
-    """The split of a group from its hash: stable, whatever the order of the ingestions."""
-    position = int(key[:12], 16) / 16 ** 12
-    if position < test_fraction:
-        return "test"
-    if position < test_fraction + val_fraction:
-        return "val"
-    return "train"
 
 
 def find_image(xml_path, name):
@@ -110,6 +101,24 @@ def extract(zip_path, target):
                 shutil.copyfileobj(src, dst)
 
 
+def assign_groups(current, new_groups, val_fraction, test_fraction):
+    """Splits of NEW groups, balanced by their number of pages -> {group: split}.
+
+    current: pages already in each split; new_groups: {group: pages}. The largest group first, each to the split
+    furthest below its share (70 / 15 / 15 by default) once the new pages are counted; equal deficits go to
+    test, then val, then train, and equal sizes are taken in the order of their keys: the result only depends
+    on the data. With few groups (registers), a split by hash could leave a split empty: this cannot."""
+    shares = {"train": 1 - val_fraction - test_fraction, "val": val_fraction, "test": test_fraction}
+    counts = {s: current.get(s, 0) for s in SPLITS}
+    total = sum(counts.values()) + sum(new_groups.values())
+    out = {}
+    for group, size in sorted(new_groups.items(), key=lambda item: (-item[1], item[0])):
+        split = max(("test", "val", "train"), key=lambda s: shares[s] * total - counts[s])
+        out[group] = split
+        counts[split] += size
+    return out
+
+
 def ingest(conn, batch_id, source, force_split=None, log=print):
     """Ingest a zip or a folder into the dataset -> report (counts only: safe to show and to log)."""
     settings = params()["ingest"]
@@ -125,11 +134,8 @@ def ingest(conn, batch_id, source, force_split=None, log=print):
             folder = temporary
         else:
             folder = source
-        # the split already given to every group (a group keeps its split)
-        known = {}
-        for row in db.all_rows(conn, "SELECT group_key, split, count(*) AS n FROM pages GROUP BY 1, 2"):
-            known.setdefault(row["group_key"], Counter())[row["split"]] += row["n"]
-        reasons = Counter()
+        # 1. check every page, find its group
+        reasons, candidates, seen = Counter(), [], set()
         xmls = sorted(folder.rglob("*.xml"))
         log(f"{len(xmls)} PageXML files")
         for number, xml_path in enumerate(xmls, 1):
@@ -138,14 +144,27 @@ def ingest(conn, batch_id, source, force_split=None, log=print):
                 reasons[reason] += 1
                 continue
             digest = hashlib.sha256(image.read_bytes()).hexdigest()
-            page_id = digest[:16]
-            if db.one(conn, "SELECT 1 AS x FROM pages WHERE sha256 = %s", digest):
+            if digest in seen or db.one(conn, "SELECT 1 AS x FROM pages WHERE sha256 = %s", digest):
                 report["duplicates"] += 1
                 continue
-            group = group_of(xml_path.stem, settings["group_pattern"])
-            split = force_split or (known[group].most_common(1)[0][0] if group in known else
-                                    split_of(group, settings["val_fraction"], settings["test_fraction"]))
-            known.setdefault(group, Counter())[split] += 1
+            seen.add(digest)
+            candidates.append((xml_path, page, image, digest, group_of(xml_path.stem, settings["group_pattern"])))
+            if number % 100 == 0:
+                log(f"{number}/{len(xmls)} checked")
+        # 2. the split of every group: a known group keeps its split, the new ones are balanced by size
+        known = {}
+        for row in db.all_rows(conn, "SELECT group_key, split, count(*) AS n FROM pages GROUP BY 1, 2"):
+            known.setdefault(row["group_key"], Counter())[row["split"]] += row["n"]
+        current = Counter()
+        for counter in known.values():
+            current.update(counter)
+        new_groups = Counter(group for *_, group in candidates if group not in known)
+        splits = {group: counter.most_common(1)[0][0] for group, counter in known.items()}
+        splits.update(assign_groups(current, new_groups, settings["val_fraction"], settings["test_fraction"]))
+        # 3. write the pages
+        for xml_path, page, image, digest, group in candidates:
+            page_id = digest[:16]
+            split = force_split or splits[group]
             image_name = page_id + image.suffix.lower()
             shutil.copyfile(image, pages_dir / image_name)
             xml_text = xml_path.read_text(encoding="utf-8")
@@ -159,15 +178,30 @@ def ingest(conn, batch_id, source, force_split=None, log=print):
             conn.execute("INSERT INTO page_origins (page_id, original_name) VALUES (%s, %s)",
                          (page_id, str(xml_path.relative_to(folder))))
             report["added"][split] += 1
-            if number % 50 == 0:
-                log(f"{number}/{len(xmls)} checked")
         report["rejected"] = sum(reasons.values())
         report["reasons"] = dict(reasons)
+        report["new_groups"] = len(new_groups)
         report["total"] = {row["split"]: row["n"] for row in
                            db.all_rows(conn, "SELECT split, count(*) AS n FROM pages GROUP BY split")}
-        log(f"added {report['added']}, {report['duplicates']} duplicates, {report['rejected']} rejected "
-            f"{report['reasons'] or ''}")
+        log(f"added {report['added']} ({len(new_groups)} new groups), {report['duplicates']} duplicates, "
+            f"{report['rejected']} rejected {report['reasons'] or ''}")
         return report
     finally:
         if temporary:
             shutil.rmtree(temporary, ignore_errors=True)
+
+
+def resplit(conn, log=print):
+    """Split every group again from scratch, balanced (assign_groups). The dataset versions already made keep
+    their own splits (dataset_pages): the models trained on them stay traceable. -> {split: pages}."""
+    settings = params()["ingest"]
+    sizes = {row["group_key"]: row["n"] for row in
+             db.all_rows(conn, "SELECT group_key, count(*) AS n FROM pages GROUP BY group_key")}
+    splits = assign_groups({}, sizes, settings["val_fraction"], settings["test_fraction"])
+    with conn.transaction():
+        for group, split in splits.items():
+            conn.execute("UPDATE pages SET split = %s WHERE group_key = %s", (split, group))
+    counts = {s: sum(n for g, n in sizes.items() if splits[g] == s) for s in SPLITS}
+    groups = {s: sum(1 for g in sizes if splits[g] == s) for s in SPLITS}
+    log(f"{len(sizes)} groups split again: " + ", ".join(f"{s} {counts[s]} pages ({groups[s]} groups)" for s in SPLITS))
+    return counts
