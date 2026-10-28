@@ -1,0 +1,65 @@
+name: deploy
+
+# When the tests pass on the default branch, the GPU machine updates its copy of the repository, builds the image,
+# waits for the running job (a training is never killed by a deployment), then restarts the containers.
+on:
+  workflow_run:
+    workflows: [tests]
+    types: [completed]
+  workflow_dispatch:            # "Run workflow" in the Actions tab: deploy the default branch now
+
+concurrency: deploy             # one deployment at a time; a newer push waits for the current one
+
+jobs:
+  deploy:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.head_branch == github.event.repository.default_branch)
+    runs-on: [self-hosted, mlops]
+    timeout-minutes: 720        # the wait for a running training included
+    env:
+      DEPLOY_DIR: ${{ vars.MLOPS_DEPLOY_DIR || '~/Documents/madoc-mlops' }}
+      BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - name: Update the code
+        run: |
+          cd ${{ env.DEPLOY_DIR }}
+          git fetch origin "$BRANCH"
+          git merge --ff-only "origin/$BRANCH"
+          git log -1 --oneline
+      - name: Build the image
+        run: |
+          cd ${{ env.DEPLOY_DIR }}
+          docker compose build
+          docker tag madoc-mlops:latest madoc-mlops:$(git rev-parse --short HEAD)
+      - name: Pause the worker and wait for the running job
+        run: |
+          cd ${{ env.DEPLOY_DIR }}
+          docker compose exec -T mlops-ui python -m mlops.cli pause
+          docker compose exec -T mlops-ui python -m mlops.cli wait-idle --timeout 41400
+      - name: Start the new version
+        run: cd ${{ env.DEPLOY_DIR }} && docker compose up -d --remove-orphans
+      - name: Resume the worker (also when a step failed)
+        if: always()
+        run: |
+          cd ${{ env.DEPLOY_DIR }}
+          for i in $(seq 1 30); do
+            docker compose exec -T mlops-ui python -m mlops.cli resume && exit 0
+            sleep 5
+          done
+          exit 1
+      - name: Check the app answers and the worker is alive
+        run: |
+          cd ${{ env.DEPLOY_DIR }}
+          curl -fsS --retry 40 --retry-delay 5 --retry-all-errors http://127.0.0.1:7870/ > /dev/null
+          for i in $(seq 1 30); do
+            if docker compose ps --status running --services | grep -qx mlops-worker \
+               && docker compose logs --since 10m mlops-worker | grep -q "ready"; then exit 0; fi
+            sleep 10
+          done
+          echo "the worker sent no heartbeat"; docker compose logs --tail 50 mlops-worker; exit 1
+      - name: Remove the images of old versions (the last 5 are kept)
+        run: |
+          docker images madoc-mlops --format '{{.Tag}} {{.CreatedAt}}' | grep -v '^latest ' | sort -k2 -r \
+            | tail -n +6 | cut -d' ' -f1 | xargs -r -I{} docker rmi madoc-mlops:{} || true

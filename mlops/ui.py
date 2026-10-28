@@ -13,7 +13,7 @@ from pathlib import Path
 
 import gradio as gr
 
-from mlops import augment, browse, db, jobs
+from mlops import augment, browse, db, jobs, settings as app_settings
 from mlops.config import SPLITS, TASKS, params, path
 from mlops.resources import gpu_stats, host_stats
 from mlops.vocabulary import coverage_html, page_types, vocabulary, vocabulary_html
@@ -55,6 +55,48 @@ def dataset_table():
     by_split = {r["split"]: r for r in rows}
     return [[s, *(int((by_split.get(s) or {}).get(k) or 0) for k in ("pages", "p1", "p2", "groups", "lines", "characters"))]
             for s in SPLITS]
+
+
+# --- training options and split settings (mlops/settings.py) -----------------------------------------------
+LABELS = {"start_from": "Start from", "epochs": "Epochs", "quit": "Stop", "lag": "Lag", "min_epochs": "Minimum epochs",
+          "batch_size": "Batch size", "resize": "Resize (alphabet)", "learning_rate": "Learning rate",
+          "schedule": "Learning-rate schedule", "cos_max": "Cosine epochs",
+          "kraken_augment": "kraken's line augmentation (--augment)",
+          "use_augmented": "Add the augmented train pages (Data tab)", "extra_args": "Other ketos options"}
+
+
+def training_values(task):
+    with db.connection() as conn:
+        values = app_settings.training(conn, task)
+        models = app_settings.madoc_models(conn)
+    keys = app_settings.TASK_FIELDS[task]
+    out = []
+    for key in keys:
+        if key == "start_from":
+            choices = sorted(set(models) | {values[key]})
+            out.append(gr.update(choices=choices, value=values[key]))
+        elif app_settings.TRAIN_FIELDS[key][0] is float:
+            out.append("" if values[key] is None else f"{values[key]:g}")
+        else:
+            out.append(values[key])
+    return out
+
+
+def split_values():
+    with db.connection() as conn:
+        value = app_settings.split(conn)
+    weights = value["split_weights"]
+    types = weights.get("page_types") or {}
+    return [100 * value["val_fraction"], 100 * value["test_fraction"], 100 * value["split_tolerance"],
+            weights.get("missing_character", 1000), types.get("1", 1000), types.get("2", 1000)]
+
+
+def split_from_form(val, test, tolerance, missing, page1, page2):
+    return app_settings.check_split({
+        "val_fraction": float(val or 0) / 100, "test_fraction": float(test or 0) / 100,
+        "split_tolerance": float(tolerance or 0) / 100,
+        "split_weights": {"missing_character": float(missing or 0),
+                          "page_types": {"1": float(page1 or 0), "2": float(page2 or 0)}}})
 
 
 def augmentations_md():
@@ -227,6 +269,10 @@ def server_html():
         alive = w["age"] < 300
         parts.append(f'Worker {html.escape(w["name"])}: {"alive" if alive else "NOT SEEN"} ({w["age"]} s ago)'
                      + (f', on job {w["job_id"]}' if w["job_id"] else ", idle"))
+    with db.connection() as conn:
+        if app_settings.paused(conn):
+            parts.append("<b>Worker paused</b> (a deployment is waiting for the running job): queued jobs start "
+                         "after the restart")
     running = execute("SELECT count(*) AS n FROM jobs WHERE status = 'queued'")["n"]
     parts.append(f"{running} job(s) waiting in the queue")
     return "<div style='line-height:1.9'>" + "<br>".join(parts) + "</div>"
@@ -255,6 +301,27 @@ def build_app():
                 # copy: a button in the corner of the table, like the copy button of the other tables
                 vocabulary_copy = gr.Button(COPY_LABEL, size="sm", render=False)
                 vocabulary_box = gr.HTML(label="Characters", buttons=[vocabulary_copy], container=True, show_label=True)
+            with gr.Accordion("Split settings (rerun the split)", open=False):
+                gr.Markdown("The groups (register + year) are placed to balance the characters and the page types "
+                            "(see the summary above the vocabulary). **Preview** computes a split with these "
+                            "settings without changing anything; **Apply** saves the settings (also used by the next "
+                            "ingests) and splits the dataset again. Trainings already made keep their own dataset "
+                            "version; evaluate them again to compare on the new test set.")
+                with gr.Row():
+                    split_val = gr.Number(label="Validation (% of the characters)", minimum=1, maximum=50)
+                    split_test = gr.Number(label="Test (% of the characters)", minimum=1, maximum=50)
+                    split_tolerance = gr.Number(label="Tolerance (% of a split's share)", minimum=0, maximum=100,
+                                                info="33: a 15 % split may hold 10 % to 20 %")
+                with gr.Row():
+                    split_missing = gr.Number(label="Weight: a character missing from a split", minimum=0,
+                                              info="x3 when missing from train")
+                    split_page1 = gr.Number(label="Weight: page 1 (names) share", minimum=0)
+                    split_page2 = gr.Number(label="Weight: page 2 (details) share", minimum=0)
+                with gr.Row():
+                    split_preview = gr.Button("Preview")
+                    split_apply = gr.Button("Apply: save and split again", variant="primary")
+                    split_reset = gr.Button("Reset to params.yaml")
+                split_result = gr.HTML()
             with gr.Accordion("Augmentation of the train pages", open=False):
                 gr.Markdown("Noise, lighting, shadow, blur, scribbles, rotation and perspective, the lines of the "
                             "PageXML moved with the image (script/data_augmentation_xml.py). Train pages only: "
@@ -276,14 +343,38 @@ def build_app():
             versions_view = gr.Dataframe(headers=["version", "digest", "created", *SPLITS], value=versions_table,
                                          interactive=False)
         with gr.Tab("Train"):
-            gr.Markdown("A training fine-tunes MaDoc's production model on the current dataset (logged live in W&B).")
-            train_buttons, use_augmented = {}, {}
+            gr.Markdown("A training fine-tunes a model of MaDoc's repository (its production model by default) on "
+                        "the current dataset, logged live in W&B. The options start from params.yaml; what you "
+                        "change here is saved for the next trainings (**Reset** goes back to params.yaml), and "
+                        "every job keeps the exact options it ran with.")
+            train_buttons, reset_buttons, fields = {}, {}, {}
             with gr.Row():
                 for task in TASKS:
                     with gr.Column():
-                        train_buttons[task] = gr.Button(f"Train {TASK_NAMES[task]}", variant="primary")
-                        use_augmented[task] = gr.Checkbox(label="with the augmented train pages",
-                                                          value=bool(params()[task].get("use_augmented")))
+                        gr.Markdown(f"#### {TASK_NAMES[task]}")
+                        fields[task] = {}
+                        for key in app_settings.TASK_FIELDS[task]:
+                            kind = app_settings.TRAIN_FIELDS[key][0]
+                            info = app_settings.TRAIN_FIELDS[key][1]
+                            info = None if info.lower() == LABELS[key].lower() else info
+                            if key == "start_from":
+                                component = gr.Dropdown(label=LABELS[key], info=info, choices=[],
+                                                        allow_custom_value=True)
+                            elif key in app_settings.CHOICES:
+                                component = gr.Dropdown(app_settings.CHOICES[key], label=LABELS[key], info=info)
+                            elif kind is bool:
+                                component = gr.Checkbox(label=LABELS[key], info=info)
+                            elif kind is int:
+                                component = gr.Number(label=LABELS[key], info=info, precision=0)
+                            elif kind is float:
+                                component = gr.Textbox(label=LABELS[key], info=info, placeholder="e.g. 1e-4")
+                            else:
+                                component = gr.Textbox(label=LABELS[key], info=info,
+                                                       placeholder="e.g. --warmup 200 --weight-decay 1e-5")
+                            fields[task][key] = component
+                        with gr.Row():
+                            train_buttons[task] = gr.Button(f"Train {TASK_NAMES[task]}", variant="primary", scale=3)
+                            reset_buttons[task] = gr.Button("Reset", scale=1)
             models_view = gr.Dataframe(headers=["model", "task", "status", "W&B artifact", "dataset version",
                                                 "validation", "created"], value=models_table, interactive=False)
         with gr.Tab("Browse"):
@@ -333,12 +424,69 @@ def build_app():
         vocabulary_refresh.click(vocabulary_view, [vocabulary_scope], [coverage_box, vocabulary_box])
         app.load(vocabulary_view, [vocabulary_scope], [coverage_box, vocabulary_box])
         vocabulary_copy.click(None, None, None, js=COPY_VOCABULARY_JS)
-        def on_train(task, augmented):
-            queue_job("train", task, use_augmented=bool(augmented))
+        def on_train(task, *values):
+            keys = app_settings.TASK_FIELDS[task]
+            try:
+                options = app_settings.clean(task, dict(zip(keys, values)))
+            except ValueError as e:
+                raise gr.Error(str(e))
+            with db.connection() as conn:
+                app_settings.save(conn, f"train.{task}", options)
+            queue_job("train", task, settings=options, use_augmented=bool(options.get("use_augmented")))
             return jobs_table()
 
-        for task, button in train_buttons.items():
-            button.click(lambda augmented, t=task: on_train(t, augmented), [use_augmented[task]], [jobs_view])
+        def on_reset(task):
+            with db.connection() as conn:
+                app_settings.reset(conn, f"train.{task}")
+            gr.Info(f"{TASK_NAMES[task]}: back to the options of params.yaml")
+            return training_values(task)
+
+        for task in TASKS:
+            inputs = [fields[task][k] for k in app_settings.TASK_FIELDS[task]]
+            train_buttons[task].click(lambda *v, t=task: on_train(t, *v), inputs, [jobs_view])
+            reset_buttons[task].click(lambda t=task: on_reset(t), None, inputs)
+            app.load(lambda t=task: training_values(t), None, inputs)
+
+        split_inputs = [split_val, split_test, split_tolerance, split_missing, split_page1, split_page2]
+
+        def split_html(result):
+            from mlops.vocabulary import coverage_html
+            text = html.escape(result["text"].split("\n")[0])
+            return f"<p><b>{text}</b></p>" + coverage_html(result["by_split"], result["types"])
+
+        def on_split_preview(*values):
+            from mlops.ingest import resplit
+            try:
+                split = split_from_form(*values)
+            except ValueError as e:
+                raise gr.Error(str(e))
+            with db.connection() as conn:
+                return split_html(resplit(conn, log=lambda *_: None, split=split, apply=False))
+
+        def on_split_apply(*values):
+            from mlops.ingest import resplit
+            try:
+                split = split_from_form(*values)
+            except ValueError as e:
+                raise gr.Error(str(e))
+            with db.connection() as conn:
+                if db.one(conn, "SELECT 1 AS x FROM jobs WHERE status IN ('queued', 'running') AND kind = 'ingest'"):
+                    raise gr.Error("An ingest is queued or running: split again once it is done.")
+                app_settings.save(conn, "split", split)
+                result = resplit(conn, log=lambda *_: None, split=split, apply=True)
+            gr.Info("Split applied: " + ", ".join(f"{s} {n} pages" for s, n in result["pages"].items()))
+            return split_html(result), dataset_table()
+
+        def on_split_reset():
+            with db.connection() as conn:
+                app_settings.reset(conn, "split")
+            gr.Info("Split settings: back to params.yaml (press Apply to split again with them)")
+            return split_values()
+
+        split_preview.click(on_split_preview, split_inputs, [split_result])
+        split_apply.click(on_split_apply, split_inputs, [split_result, dataset_view])
+        split_reset.click(on_split_reset, None, split_inputs)
+        app.load(split_values, None, split_inputs)
 
         def on_augment(copies, seed):
             queue_job("augment", None, copies=int(copies or 1), seed=int(seed or 0))

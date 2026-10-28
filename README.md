@@ -209,6 +209,42 @@ both types in the same proportion. Pages ingested before this version get their 
 (from `page_origins`); run `resplit` to balance them. After changing `page_type_pattern`, clear the types first:
 `docker compose exec db psql -U mlops -d mlops -c "UPDATE pages SET page_type = NULL;"`, then restart `mlops-ui`.
 
+### Automatic deployment
+
+Every push to the default branch runs the tests on GitHub (`tests.yml`); when they pass, `deploy.yml` runs on the
+GPU machine: it updates `~/Documents/madoc-mlops` (fast-forward only), builds the image, **pauses the worker and
+waits for the running job** (a training is never killed by a deployment; queued jobs wait), restarts the
+containers, resumes the worker and checks the app and the worker. "Run workflow" in the Actions tab deploys by hand.
+
+Set it up once, on the GPU machine (a runner of this repository: the one of MaDoc only serves MaDoc):
+
+1. GitHub → madoc-mlops → Settings → Actions → Runners → **New self-hosted runner** (Linux x64): run its
+   download commands in a new folder, `~/actions-runner-mlops`, then configure it with the label `mlops`:
+   `./config.sh --url https://github.com/<owner>/madoc-mlops --token <token> --name DIL2-mlops --labels mlops --unattended`
+2. Install it as a service (it starts with the machine): `sudo ./svc.sh install && sudo ./svc.sh start`.
+   Its user must be in the `docker` group (already the case for MaDoc's runner).
+3. `~/Documents/madoc-mlops` must be a clone of this repository on the default branch, with `.env` (never in
+   git). Commit your changes instead of editing files there: a local change blocks the fast-forward. Another
+   folder: set the repository variable `MLOPS_DEPLOY_DIR` (Settings → Secrets and variables → Actions → Variables).
+4. Settings → Actions → General → "Fork pull request workflows": require approval for all outside collaborators
+   (a self-hosted runner must never run code from a fork).
+
+Pause and resume by hand: `docker compose exec mlops-ui python -m mlops.cli pause` / `resume`.
+
+### Training options and split settings in the app
+
+**Train** shows the options of each task: the model to start from (any `.mlmodel` of MaDoc's repository, its
+production model by default), epochs, stop rule, lag, minimum epochs, batch size (HTR), resize, learning rate and
+schedule, kraken's line augmentation, the augmented train pages, and any other ketos option. They start from
+`params.yaml` (`blla:` / `htr:`); what you change is saved in the database when you press Train and used for the
+next trainings; **Reset** comes back to `params.yaml`. Every job keeps the exact options it ran with (in its
+log, its job arguments and its W&B config).
+
+**Data → Split settings**: the validation and test shares, the tolerance and the weights of the split (a
+character missing from a split, the share of page 1 and of page 2). **Preview** computes the split without
+changing anything; **Apply** saves the settings (also used by the next ingests) and splits the dataset again, as
+`mlops.cli resplit` does. **Reset to params.yaml** comes back to `ingest:` of `params.yaml`.
+
 ### Normalisation of the transcriptions
 
 Some characters look exactly like others in the image: a no-break space (U+00A0) like a space, a zero-width
@@ -336,6 +372,7 @@ madoc-mlops/
 │   ├── worker.py             the job loop, heartbeat, cancellation
 │   ├── jobs.py               the queue (PostgreSQL, SKIP LOCKED) and the job logs
 │   ├── ingest.py             checks, pseudonymisation, split by group
+│   ├── settings.py           the options chosen in the app (training, split), on top of params.yaml
 │   ├── normalize.py          the replacement of invisible / look-alike characters
 │   ├── splitting.py          the placement of the groups, balanced on the characters and page types
 │   ├── browse.py             the Browse tab (pages by split, lines drawn, PageXML)

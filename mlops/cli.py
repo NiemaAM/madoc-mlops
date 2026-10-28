@@ -6,11 +6,15 @@
     python -m mlops.cli jobs                   # the last jobs
     python -m mlops.cli normalize              # apply ingest.normalize to the pages already in the dataset
     python -m mlops.cli resplit                # split every group again, balanced on the characters (mlops/splitting.py)
+    python -m mlops.cli pause                  # the worker takes no new job (the running one goes on)
+    python -m mlops.cli wait-idle --timeout 36000    # wait until no job is running (0), or the timeout (1)
+    python -m mlops.cli resume                 # the worker takes jobs again
 """
 
 import argparse
 import shutil
 import sys
+import time
 from pathlib import Path
 
 from mlops import db, jobs
@@ -52,6 +56,23 @@ def list_jobs():
                   f'{job["created_at"]:%Y-%m-%d %H:%M} {job["error"] or ""}')
 
 
+def wait_idle(timeout, every=60):
+    """Wait until no job is running -> 0, or 1 after `timeout` seconds."""
+    end = time.time() + timeout
+    while True:
+        with db.connection() as conn:
+            running = db.all_rows(conn, "SELECT id, kind, task, started_at FROM jobs WHERE status = 'running'")
+        if not running:
+            print("no job running", flush=True)
+            return 0
+        if time.time() >= end:
+            print(f"still running after {timeout} s: " + ", ".join(f'job {j["id"]}' for j in running), flush=True)
+            return 1
+        print("waiting for " + ", ".join(f'job {j["id"]} ({j["kind"]} {j["task"] or ""}, started '
+                                         f'{j["started_at"]:%H:%M})' for j in running), flush=True)
+        time.sleep(every)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="MLOps platform commands")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -63,6 +84,10 @@ def main(argv=None):
     sub.add_parser("jobs")
     sub.add_parser("normalize", help="apply ingest.normalize (params.yaml) to the pages already in the dataset")
     sub.add_parser("resplit", help="split every group again, balanced on the characters (before the first training)")
+    sub.add_parser("pause", help="the worker takes no new job (before a deployment)")
+    sub.add_parser("resume", help="the worker takes jobs again")
+    w = sub.add_parser("wait-idle", help="wait until no job is running")
+    w.add_argument("--timeout", type=int, default=36000, help="seconds (default 10 h)")
     args = parser.parse_args(argv)
     if args.command == "health":
         return health(args.component)
@@ -77,6 +102,13 @@ def main(argv=None):
         from mlops.ingest import resplit
         with db.connection() as conn:
             resplit(conn)
+    elif args.command in ("pause", "resume"):
+        from mlops import settings
+        with db.connection() as conn:
+            (settings.pause if args.command == "pause" else settings.resume)(conn)
+        print("worker paused: no new job" if args.command == "pause" else "worker resumed")
+    elif args.command == "wait-idle":
+        return wait_idle(args.timeout)
     else:
         list_jobs()
     return 0

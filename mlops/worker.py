@@ -108,12 +108,19 @@ def main(once=False):
     with db.connection() as conn:
         jobs.recover(conn)
         try:
-            release.sync()
+            from mlops.settings import publish_models
+            publish_models(conn, release.sync())
             release.mark_production()
         except Exception as e:
             print(f"MaDoc clone not synced yet: {e}", flush=True)
         print(f"worker {NAME} ready", flush=True)
+        from mlops.settings import paused
         while True:
+            if paused(conn):   # a deployment is waiting for the running job: take no new one
+                if once:
+                    break
+                time.sleep(3)
+                continue
             job = jobs.claim(conn)
             if job is None:
                 if once:

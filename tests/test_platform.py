@@ -416,6 +416,62 @@ def test_whole_flow_with_the_worker(env, madoc_remote, monkeypatch):
         assert not db.one(conn, "SELECT count(*) AS n FROM job_logs WHERE line LIKE '%%03010108%%'")["n"]
 
 
+def test_training_options_and_split_settings(env):
+    from mlops import db, settings
+    from mlops.ingest import resplit
+    from mlops.train import ketos_command
+    with db.connection() as conn:
+        htr = settings.training(conn, "htr")                                   # params.yaml
+        assert htr["batch_size"] == 30 and htr["quit"] == "early" and "batch_size" not in settings.training(conn, "blla")
+        chosen = settings.clean("htr", {**htr, "epochs": "40", "lag": 7, "learning_rate": "1e-4", "schedule": "cosine",
+                                        "cos_max": 40, "kraken_augment": True, "extra_args": "--warmup 200"})
+        settings.save(conn, "train.htr", chosen)
+        assert settings.training(conn, "htr")["learning_rate"] == 1e-4           # saved from the app
+        cmd = ketos_command("htr", settings.training(conn, "htr"), "/m.mlmodel", "t.txt", "v.txt", "out")
+        text = " ".join(cmd)
+        for part in ("train --load /m.mlmodel", "--epochs 40", "--quit early", "--lag 7", "--lrate 0.0001",
+                     "--schedule cosine", "--cos-max 40", "--batch-size 30", "--augment", "--warmup 200",
+                     "--resize new"):
+            assert part in text, part
+        blla = ketos_command("blla", settings.training(conn, "blla"), "/b.mlmodel", "t", "v", "o")
+        assert "segtrain" in blla and "--batch-size" not in blla and "--lrate" in blla
+        settings.reset(conn, "train.htr")
+        assert settings.training(conn, "htr") == htr
+        with pytest.raises(ValueError):
+            settings.clean("htr", {**htr, "resize": "both"})
+        with pytest.raises(ValueError):
+            settings.check_split({"val_fraction": 0.6, "test_fraction": 0.5, "split_tolerance": 0.3,
+                                  "split_weights": {}})
+        # the split: preview changes nothing, apply splits again with the chosen fractions
+        pages = [(f"03010108_1_{r}_I_2016_{a}-{t}-1", (r * 25, a * 15, t * 70)) for r in range(10) for a in range(6)
+                 for t in (1, 2)]
+        ingest_zip(conn, env, "s", pages)
+        before = {r["id"]: r["split"] for r in db.all_rows(conn, "SELECT id, split FROM pages")}
+        split = {"val_fraction": 0.3, "test_fraction": 0.3, "split_tolerance": 0.5,
+                 "split_weights": {"missing_character": 1000, "page_types": {"1": 1000, "2": 3000}}}
+        preview = resplit(conn, log=lambda *_: None, split=split, apply=False)
+        assert {r["id"]: r["split"] for r in db.all_rows(conn, "SELECT id, split FROM pages")} == before
+        assert "preview" in preview["text"]
+        settings.save(conn, "split", split)
+        result = resplit(conn, log=lambda *_: None)                          # the saved settings
+        assert result["groups"]["val"] >= 2 and result["groups"]["test"] >= 2
+
+
+def test_a_paused_worker_takes_no_job(env):
+    from mlops import cli, db, jobs, settings, worker
+    with db.connection() as conn:
+        job = jobs.enqueue(conn, "augment")
+        settings.pause(conn)
+        worker.main(once=True)                                   # paused: the queued job stays queued
+        assert db.one(conn, "SELECT status FROM jobs WHERE id = %s", job["id"])["status"] == "queued"
+        assert cli.wait_idle(timeout=0) == 0                     # nothing running
+        conn.execute("UPDATE jobs SET status = 'running' WHERE id = %s", (job["id"],))
+        assert cli.wait_idle(timeout=0, every=0) == 1            # a job running: the deployment waits
+        conn.execute("UPDATE jobs SET status = 'queued' WHERE id = %s", (job["id"],))
+        settings.resume(conn)
+        assert not settings.paused(conn)
+
+
 def test_the_app_builds(env):
     pytest.importorskip("gradio")
     from mlops import ui
