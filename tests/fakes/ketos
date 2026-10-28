@@ -1,15 +1,30 @@
 #!/usr/bin/env python3
 """A stand-in for ketos in the tests: writes what the real one writes, instantly."""
-import pathlib, sys
+import os, pathlib, sys
 a = sys.argv[1:]
 while a and a[0] in ("-d", "-s"):
     a = a[2:]
 cmd = a[0]
 if cmd in ("train", "segtrain"):
     out = pathlib.Path(a[a.index("--output") + 1]); out.mkdir(parents=True, exist_ok=True)
+    writer = None
+    if os.environ.get("MLOPS_TB_DIR"):   # the metrics for TensorBoard, as mlops/ketos_logged.py makes kraken write them
+        import time
+        from tensorboard.compat.proto.event_pb2 import Event
+        from tensorboard.compat.proto.summary_pb2 import Summary
+        from tensorboard.summary.writer.event_file_writer import EventFileWriter
+        writer = EventFileWriter(str(pathlib.Path(os.environ["MLOPS_TB_DIR"]) / "lightning_logs" / "version_0"))
     for s in (1, 2, 3):
-        print(f"stage {s}/∞ train_loss_step: 0.{5 - s} val_accuracy: 0.9{s} val_word_accuracy: 0.8{s} val_bl_f1: 0.8{s}")
+        if writer:
+            for tag, value in (("train_loss", 0.5 - s / 10), ("val_accuracy", 0.9 + s / 100), ("val_bl_f1", 0.8 + s / 100),
+                               ("epoch", s - 1)):
+                writer.add_event(Event(wall_time=time.time(), step=s * 10,
+                                       summary=Summary(value=[Summary.Value(tag=tag, simple_value=value)])))
         (out / f"checkpoint_{s:02d}-0.9{s}.ckpt").write_text("w")
+    if writer:
+        writer.close()
+    # the progress bar of ketos, printed once at the end when the output is not a terminal
+    print("stage 3/∞ train_loss_step: 0.2 val_accuracy: 0.93 val_word_accuracy: 0.83 val_bl_f1: 0.83")
 elif cmd == "convert":
     pathlib.Path(a[a.index("-o") + 1]).write_text("model from " + a[-1])
 elif cmd == "test":
@@ -20,3 +35,6 @@ elif cmd == "test":
 elif cmd == "segtest":
     good = "/runs/" in a[a.index("-m") + 1]
     print(f"│ Overall │ 0.95 │ 0.93 │ {0.95 if good else 0.94} │")
+    print("│ baselines │ default │ 2 │ 2 │ 2424 │ 2424 │ ok │")
+    print("│ aux │ _start_separator │ 0.997 │ 0.340 │ N/A │")
+    print("│ default │ 0.95 │ 0.93 │ 0.94 │")

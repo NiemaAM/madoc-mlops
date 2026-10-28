@@ -64,21 +64,37 @@ augment:
   copies: 1                    # the defaults of the Data tab and of a training that finds no augmentation
   seed: 42
 
+# the training options: the defaults of the Train tab (what is changed there is saved in the database and used
+# from then on, "Reset" comes back to these). Empty / null: kraken's default.
 blla:
-  epochs: -1                   # until early stopping (--quit early, after `lag` epochs without a better val_mean_iu)
+  start_from: models/blla.mlmodel   # a .mlmodel of MaDoc's repository (its production model)
+  epochs: -1                   # until early stopping
+  quit: early                  # early: stop after `lag` epochs without a better val_mean_iu; fixed: `epochs` epochs
   lag: 5
+  min_epochs: null
   resize: union
   # fine-tuning a model that is already good: a smaller learning rate than kraken's 2e-4, decreasing over 30 epochs
-  extra_args: ["-r", "5e-5", "--schedule", "cosine", "--cos-max", "30"]
-  use_augmented: false         # default of the "use augmented pages" box of the Train tab
+  learning_rate: 5.0e-5
+  schedule: cosine
+  cos_max: 30
+  kraken_augment: false        # ketos --augment
+  use_augmented: false         # add the augmented train pages (Data tab)
+  extra_args: ""               # any other ketos segtrain option
 
 htr:
+  start_from: models/htr.mlmodel
   epochs: -1
-  batch_size: 30
+  quit: early
   lag: 20
-  resize: new
-  extra_args: []
-  use_augmented: true          # default of the "use augmented pages" box of the Train tab
+  min_epochs: null
+  batch_size: 30
+  resize: new                  # union: keep the model's alphabet and add the new characters; new: exactly the data's
+  learning_rate: null          # kraken's default (1e-3)
+  schedule: constant
+  cos_max: null
+  kraken_augment: false
+  use_augmented: true
+  extra_args: ""
 
 # a candidate is better when it wins on the SAME test pages (old + new), with a confidence interval computed by
 # resampling the pages (bootstrap): a gain that could be noise does not pass.

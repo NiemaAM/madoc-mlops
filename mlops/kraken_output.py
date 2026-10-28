@@ -84,7 +84,10 @@ def htr_report(report):
 # --- ketos segtest (segmentation) ------------------------------------------------------------------------
 OVERALL = re.compile(r"│\s*Overall\s*│\s*([0-9.]+)\s*│\s*([0-9.]+)\s*│\s*([0-9.]+)")
 CLASS_ROW = re.compile(r"│\s*([A-Za-z0-9_]+)\s*│\s*([0-9.]+)\s*│\s*([0-9.]+)\s*│\s*([0-9.]+)")
-IOU_ROW = re.compile(r"│\s*(\w+)\s*│\s*([A-Za-z0-9_]+)\s*│\s*([0-9.]+)\s*│\s*([0-9.]+)")
+# "│ aux │ _start_separator │ 0.997 │ 0.340 │ N/A │": decimals only. segtest also prints a table of the classes
+# of the model and of the test set, "│ baselines │ default │ 2 │ 2 │ 2424 │ 2424 │ ok │" (label indices and
+# counts, integers): read as pixel accuracy 2 and IoU 2, it made bars of 2.0 in the charts.
+IOU_ROW = re.compile(r"│\s*(\w+)\s*│\s*([A-Za-z0-9_]+)\s*│\s*([0-9]*\.[0-9]+)\s*│\s*([0-9]*\.[0-9]+)\s*│")
 
 
 def blla_report(report):

@@ -31,7 +31,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from mlops import db, normalize
+from mlops import db, normalize, settings as app_settings
 from mlops.config import SPLITS, params, path
 from mlops.pagexml import read_page, set_image_name
 from mlops.splitting import assign_groups, coverage, describe
@@ -184,9 +184,9 @@ def ingest(conn, batch_id, source, force_split=None, log=print):
                 new_types.setdefault(group, Counter())[kind] += 1
         splits = dict(known)
         if not force_split:
-            splits.update(assign_groups(fixed, new_groups, settings["val_fraction"], settings["test_fraction"],
-                                        settings.get("split_tolerance", 0.33), fixed_types, new_types,
-                                        settings.get("split_weights")))
+            split = app_settings.split(conn)   # params.yaml, or what was chosen in the app (Data tab)
+            splits.update(assign_groups(fixed, new_groups, split["val_fraction"], split["test_fraction"],
+                                        split["split_tolerance"], fixed_types, new_types, split["split_weights"]))
         by_split = {split: Counter(counter) for split, counter in fixed.items()}
         types_by_split = {split: Counter(counter) for split, counter in fixed_types.items()}
         for group, characters in new_groups.items():
@@ -248,22 +248,24 @@ def normalize_dataset(conn, log=print):
     return total
 
 
-def resplit(conn, log=print):
-    """Split every group again from scratch, balanced on the characters and the page types (mlops/splitting.py).
-    The dataset versions already made keep their own splits (dataset_pages): the models trained on them stay
-    traceable. -> {"pages": {split: n}, "coverage": ...}."""
-    settings = params()["ingest"]
+def resplit(conn, log=print, split=None, apply=True):
+    """Split every group again from scratch, balanced on the characters and the page types (mlops/splitting.py),
+    with `split` (val_fraction, test_fraction, split_tolerance, split_weights; default: the settings now).
+    apply=False: only computes it (the preview of the app). The dataset versions already made keep their own
+    splits (dataset_pages): the models trained on them stay traceable. -> {"pages", "groups", "coverage", "text"}."""
+    split = split or app_settings.split(conn)
     backfill_page_types(conn)
     groups, types, sizes = {}, {}, Counter()
     for row in db.all_rows(conn, "SELECT id, group_key, page_type FROM pages ORDER BY id"):
         groups.setdefault(row["group_key"], Counter()).update(page_characters(row["id"]))
         types.setdefault(row["group_key"], Counter())[row["page_type"]] += 1
         sizes[row["group_key"]] += 1
-    splits = assign_groups({}, groups, settings["val_fraction"], settings["test_fraction"],
-                           settings.get("split_tolerance", 0.33), None, types, settings.get("split_weights"))
-    with conn.transaction():
-        for group, split in splits.items():
-            conn.execute("UPDATE pages SET split = %s WHERE group_key = %s", (split, group))
+    splits = assign_groups({}, groups, split["val_fraction"], split["test_fraction"], split["split_tolerance"],
+                           None, types, split["split_weights"])
+    if apply:
+        with conn.transaction():
+            for group, name in splits.items():
+                conn.execute("UPDATE pages SET split = %s WHERE group_key = %s", (name, group))
     by_split, types_by_split = {s: Counter() for s in SPLITS}, {s: Counter() for s in SPLITS}
     for group, characters in groups.items():
         by_split[splits[group]].update(characters)
@@ -271,6 +273,8 @@ def resplit(conn, log=print):
     pages = {s: sum(n for g, n in sizes.items() if splits[g] == s) for s in SPLITS}
     counts = {s: sum(1 for g in groups if splits[g] == s) for s in SPLITS}
     report = coverage(by_split, types_by_split)
-    log(f"{len(groups)} groups split again: " + ", ".join(f"{s} {pages[s]} pages ({counts[s]} groups)" for s in SPLITS))
-    log(describe(report))
-    return {"pages": pages, "coverage": report}
+    text = (f"{len(groups)} groups split {'again' if apply else '(preview, not applied)'}: "
+            + ", ".join(f"{s} {pages[s]} pages ({counts[s]} groups)" for s in SPLITS) + "\n" + describe(report))
+    log(text)
+    return {"pages": pages, "groups": counts, "coverage": report, "text": text, "by_split": by_split,
+            "types": types_by_split}

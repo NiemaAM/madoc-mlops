@@ -6,11 +6,12 @@ checkpoint is exported to .mlmodel and registered in W&B as a new version of the
 "candidate"), and in the database (models).
 """
 
+import shlex
 import shutil
 import sys
 from importlib.metadata import PackageNotFoundError, version as package_version
 
-from mlops import datasets, db, release
+from mlops import datasets, db, release, settings as app_settings
 from mlops.augment import augmented_paths
 from mlops.config import params, path
 from mlops.kraken_output import best_checkpoint, stage, train_metrics
@@ -30,20 +31,44 @@ def ketos_program():
 
 
 def ketos_command(task, settings, base, train_list, val_list, out):
-    """The ketos command (the options of the previous src/blla_train.py and src/htr_train.py)."""
-    device = ["-d", params()["device"], "-s", params()["seed"]]
+    """The ketos command of a training, from its options (mlops/settings.py: TRAIN_FIELDS)."""
+    o = settings
+    cmd = [*ketos_program(), "-d", params()["device"], "-s", params()["seed"],
+           "train" if task == "htr" else "segtrain", "--load", base, "--output", out,
+           "--format-type", "page" if task == "htr" else "xml",
+           "--training-data", train_list, "--evaluation-data", val_list,
+           "--resize", o.get("resize") or "union", "--epochs", -1 if o.get("epochs") is None else o["epochs"],
+           # early: stop when the validation has not improved for `lag` epochs (segtrain's default is "fixed": with
+           # --epochs -1 it would never stop)
+           "--quit", o.get("quit") or "early"]
+    optional = {"lag": "--lag", "min_epochs": "--min-epochs", "learning_rate": "--lrate", "schedule": "--schedule",
+                "cos_max": "--cos-max"}
     if task == "htr":
-        cmd = [*ketos_program(), *device, "train", "--load", base, "--resize", settings["resize"], "--output", out,
-               "--format-type", "page", "--training-data", train_list, "--evaluation-data", val_list,
-               "--epochs", settings["epochs"], "--batch-size", settings["batch_size"], "--lag", settings["lag"]]
-    else:
-        cmd = [*ketos_program(), *device, "segtrain", "--load", base, "--resize", settings["resize"], "--output", out,
-               "--format-type", "xml", "--training-data", train_list, "--evaluation-data", val_list,
-               "--epochs", settings["epochs"], "--lag", settings.get("lag", 10)]
-    # -q early: stop when the validation metric has not improved for --lag epochs. Needed for segtrain, whose
-    # default is "fixed" (with --epochs -1 it never stops); explicit for train too.
-    cmd += ["--quit", "early"]
-    return [str(c) for c in cmd + list(settings.get("extra_args") or [])]
+        optional["batch_size"] = "--batch-size"
+    for key, flag in optional.items():
+        if o.get(key) is not None and o.get(key) != "":
+            cmd += [flag, o[key]]
+    if o.get("kraken_augment"):
+        cmd.append("--augment")
+    extra = o.get("extra_args") or []
+    cmd += shlex.split(extra) if isinstance(extra, str) else list(extra)
+    return [str(c) for c in cmd]
+
+
+def base_model(task, start_from):
+    """The model to fine-tune: a .mlmodel of the MaDoc clone (the production model by default) -> {path, card,
+    production}. The card (lineage, W&B) only belongs to the production model."""
+    production = release.production(task)
+    relative = start_from or params()["release"]["models"][task]
+    folder = release.clone_dir().resolve()
+    path_ = (folder / relative).resolve()
+    if folder not in path_.parents or path_.suffix != ".mlmodel":
+        raise RuntimeError(f"{relative}: not a .mlmodel of MaDoc's repository")
+    if not path_.is_file():
+        raise RuntimeError(f"no model {relative} in MaDoc's repository")
+    is_production = path_ == production["path"].resolve()
+    return {"path": path_, "card": production["card"] if is_production else {}, "production": is_production,
+            "relative": relative}
 
 
 def kraken_version():
@@ -58,7 +83,10 @@ def train(conn, job, log, should_stop, set_wandb_url):
     import wandb
 
     task = job["task"]
-    settings = params()[task]
+    args = job["args"] or {}
+    # the options chosen in the app when the job was queued (kept in the job), else the saved ones / params.yaml
+    settings = args.get("settings") or app_settings.training(conn, task)
+    log("options: " + ", ".join(f"{k}={v}" for k, v in settings.items() if v not in (None, "")))
     wandb_settings = params()["wandb"]
     version = datasets.snapshot(conn)
     train_rows = datasets.pages(conn, version["id"], "train")
@@ -68,22 +96,20 @@ def train(conn, job, log, should_stop, set_wandb_url):
     out = path("runs") / task / f'job-{job["id"]}'
     out.mkdir(parents=True, exist_ok=True)
     train_paths = datasets.xml_paths(train_rows)
-    args = job["args"] or {}
     use_augmented = args.get("use_augmented", settings.get("use_augmented")) and params()["augment"]["enabled"]
     augmented = augmented_paths(version, train_rows, log, should_stop) if use_augmented else []
     train_paths += augmented
     train_list = datasets.write_list(train_paths, out / "train.txt")
     val_list = datasets.write_list(datasets.xml_paths(val_rows), out / "val.txt")
-    release.sync()
-    base = release.production(task)
-    if not base["path"].is_file():
-        raise RuntimeError(f"no production model at {base['path']} in MaDoc's repository")
+    app_settings.publish_models(conn, release.sync())
+    base = base_model(task, settings.get("start_from"))
+    log(f'starting from {base["relative"]}' + (" (production)" if base["production"] else ""))
     free_gpu(log)
     run_ = wandb.init(
         project=wandb_settings["project"][task], entity=wandb_settings["entity"], job_type="train",
         name=f'{task}-job{job["id"]}',
         config={"task": task, "job": job["id"], "dataset_version": version["digest"], "pages": version["counts"],
-                "train_files": len(train_paths), "augmented_pages": len(augmented), "base_model": base["card"].get("artifact", "MaDoc models/"),
+                "train_files": len(train_paths), "augmented_pages": len(augmented), "base_model": base["card"].get("artifact") or base["relative"],
                 "settings": settings, "augment": params()["augment"], "kraken": kraken_version(), "gpu": gpu_name()})
     set_wandb_url(run_.url)
     if base["card"].get("artifact"):

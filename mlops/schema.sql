@@ -102,3 +102,10 @@ CREATE TABLE IF NOT EXISTS workers (
     seen_at  timestamptz NOT NULL DEFAULT now(),
     job_id   integer
 );
+
+-- the settings changed in the app (training options per task, split), on top of params.yaml (mlops/settings.py)
+CREATE TABLE IF NOT EXISTS settings (
+    name        text PRIMARY KEY,
+    value       jsonb NOT NULL,
+    updated_at  timestamptz NOT NULL DEFAULT now()
+);
