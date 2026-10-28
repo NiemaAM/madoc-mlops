@@ -2,6 +2,8 @@ name: deploy
 
 # When the tests pass on the default branch, the GPU machine updates its copy of the repository, builds the image,
 # waits for the running job (a training is never killed by a deployment), then restarts the containers.
+# The platform commands (pause, wait-idle, resume) run in a one-off container of the NEW image ("compose run"),
+# not in the running one: an older version may not have them yet (the first deployment of this workflow).
 on:
   workflow_run:
     workflows: [tests]
@@ -36,8 +38,8 @@ jobs:
       - name: Pause the worker and wait for the running job
         run: |
           cd ${{ env.DEPLOY_DIR }}
-          docker compose exec -T mlops-ui python -m mlops.cli pause
-          docker compose exec -T mlops-ui python -m mlops.cli wait-idle --timeout 41400
+          docker compose run --rm --no-deps -T mlops-ui python -m mlops.cli pause
+          docker compose run --rm --no-deps -T mlops-ui python -m mlops.cli wait-idle --timeout 41400
       - name: Start the new version
         run: cd ${{ env.DEPLOY_DIR }} && docker compose up -d --remove-orphans
       - name: Resume the worker (also when a step failed)
@@ -45,7 +47,7 @@ jobs:
         run: |
           cd ${{ env.DEPLOY_DIR }}
           for i in $(seq 1 30); do
-            docker compose exec -T mlops-ui python -m mlops.cli resume && exit 0
+            docker compose run --rm --no-deps -T mlops-ui python -m mlops.cli resume && exit 0
             sleep 5
           done
           exit 1
