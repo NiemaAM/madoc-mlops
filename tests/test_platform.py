@@ -37,26 +37,55 @@ def test_ketos_reports():
 
 
 def test_group_and_split():
-    from mlops.ingest import assign_groups, group_of
+    from collections import Counter
+    from mlops.ingest import group_of
+    from mlops.splitting import assign_groups, coverage
     pattern = r"^(.+?_\d{4})_"
     assert group_of("03010108_1_1_I_2016_162-2-1", pattern) == group_of("03010108_1_1_I_2016_7-2-1", pattern)
     assert group_of("03010108_1_1_I_2016_162-2-1", pattern) != group_of("03010108_1_1_I_2017_162-2-1", pattern)
     assert group_of("other", pattern) != group_of("other2", pattern)                  # no match: its own group
     assert "2016" not in group_of("03010108_1_1_I_2016_1", pattern)                   # a keyed hash, not the name
+
+    def share(groups, splits):
+        totals = {s: sum(sum(c.values()) for g, c in groups.items() if splits[g] == s) for s in ("train", "val", "test")}
+        return {s: n / sum(totals.values()) for s, n in totals.items()}
+
     # few large groups (7 registers, as in birth_certificates_v2): no split is left empty
     sizes = {"a": 120, "b": 100, "c": 90, "d": 80, "e": 70, "f": 60, "g": 50}
-    splits = assign_groups({}, sizes, 0.15, 0.15)
-    pages = {s: sum(n for g, n in sizes.items() if splits[g] == s) for s in ("train", "val", "test")}
-    assert all(pages.values()) and pages["train"] > pages["val"] and pages["train"] > pages["test"]
-    assert assign_groups({}, sizes, 0.15, 0.15) == splits                              # only depends on the data
-    # many small groups: close to 70 / 15 / 15
-    many = {f"g{i:03d}": 5 + i % 7 for i in range(200)}
-    splits = assign_groups({}, many, 0.15, 0.15)
-    total = sum(many.values())
-    for split, share in (("train", 0.7), ("val", 0.15), ("test", 0.15)):
-        assert abs(sum(n for g, n in many.items() if splits[g] == split) / total - share) < 0.02
+    groups = {g: Counter({"ا": n * 30, "ل": n * 20}) for g, n in sizes.items()}
+    splits = assign_groups({}, groups, 0.15, 0.15)
+    shares = share(groups, splits)
+    assert all(shares.values()) and shares["train"] > shares["val"] and shares["train"] > shares["test"]
+    assert assign_groups({}, groups, 0.15, 0.15) == splits                            # only depends on the data
+    # many small groups: close to 70 / 15 / 15 of the characters
+    many = {f"g{i:03d}": Counter({"ر": 50 + 10 * (i % 7), "م": 30}) for i in range(200)}
+    for split, target in share(many, assign_groups({}, many, 0.15, 0.15)).items():
+        assert abs(target - {"train": 0.7, "val": 0.15, "test": 0.15}[split]) < 0.02
     # later batches fill the split that is short
-    assert set(assign_groups({"train": 70, "val": 15, "test": 0}, {"x": 10}, 0.15, 0.15).values()) == {"test"}
+    fixed = {"train": Counter({"a": 700}), "val": Counter({"a": 150}), "test": Counter()}
+    assert assign_groups(fixed, {"x": Counter({"a": 150})}, 0.15, 0.15) == {"x": "test"}
+    # coverage: a rare character in 3 groups ends up in every split, even if a size-only split would put the 3
+    # groups in train; a character in a single group goes to train
+    groups = {f"g{i}": Counter({"a": 100}) for i in range(14)}
+    for i in (0, 1, 2):
+        groups[f"g{i}"]["ڭ"] = 2
+    groups["g3"]["ﻻ"] = 1
+    splits = assign_groups({}, groups, 0.15, 0.15)
+    by_split = {s: sum((c for g, c in groups.items() if splits[g] == s), Counter()) for s in ("train", "val", "test")}
+    report = coverage(by_split)
+    assert {splits[g] for g in ("g0", "g1", "g2")} == {"train", "val", "test"} and splits["g3"] == "train"
+    assert report["missing"]["train"] == "" and report["in_all_splits"] == 2
+    assert all(abs(report["share"][s] - t) <= 0.33 * t + 1e-9 for s, t in (("val", .15), ("test", .15)))
+    # page types: val and test get their share of the page 2 (the pages MaDoc structures), within the tolerance
+    pages = {"g0": (60, 10), "g1": (50, 15), "g2": (10, 60), "g3": (15, 55), "g4": (40, 40), "g5": (20, 30),
+             "g6": (5, 25)}
+    groups = {g: Counter({"a": 40 * (p1 + p2), "b": 20 * p2 + 5}) for g, (p1, p2) in pages.items()}
+    types = {g: Counter({"1": p1, "2": p2}) for g, (p1, p2) in pages.items()}
+    splits = assign_groups({}, groups, 0.15, 0.15, 0.33, None, types)
+    page2 = sum(p2 for _, p2 in pages.values())
+    for split in ("val", "test"):
+        share = sum(p2 for g, (_, p2) in pages.items() if splits[g] == split) / page2
+        assert 0.10 <= share <= 0.20, (split, share)
 
 
 def test_gate():
@@ -144,10 +173,105 @@ def test_resplit_balances_the_groups(env):
     with db.connection() as conn:
         pages = [(f"03010108_1_{r}_I_2016_{a}-1", (r * 30, a * 8, 99)) for r in range(7) for a in range(10 + r)]
         ingest_zip(conn, env, "v2", pages, force_split="train")                        # everything in train
-        counts = resplit(conn, log=lambda *_: None)
+        result = resplit(conn, log=lambda *_: None)
+        counts = result["pages"]
         assert all(counts.values()) and sum(counts.values()) == len(pages)
+        assert result["coverage"]["missing"]["train"] == "" and result["coverage"]["characters"] > 0
         groups = db.all_rows(conn, "SELECT group_key, count(DISTINCT split) AS n FROM pages GROUP BY group_key")
         assert all(g["n"] == 1 for g in groups)
+
+
+def test_page_types_are_balanced_and_never_split_apart(env):
+    from mlops import db
+    from mlops.ingest import page_type_of, resplit
+    from mlops.config import params
+    from mlops.ingest import group_of
+    pattern = params()["ingest"]["page_type_pattern"]
+    assert page_type_of("03010108_1_1_I_2004_1-1-1", pattern) == "1"
+    assert page_type_of("03010108_1_1_I_2004_1-2-1", pattern) == "2"
+    assert page_type_of("scan", pattern) == "other"
+    group = params()["ingest"]["group_pattern"]
+    assert group_of("03010108_1_1_I_2004_1-1-1", group) == group_of("03010108_1_1_I_2004_1-2-1", group)
+    with db.connection() as conn:
+        # 9 register-years; in 3 of them only page 2 was transcribed (a split without page 1 would be easy to get)
+        pages = []
+        for r in range(9):
+            for act in range(6 + r):
+                for side in ((2,) if r < 3 else (1, 2)):
+                    pages.append((f"03010108_1_{r}_I_2016_{act}-{side}-1", (r * 25, act * 9, side * 60)))
+        report = ingest_zip(conn, env, "types", pages)
+        assert sum(report["added"].values()) == len(pages)
+        rows = db.all_rows(conn, "SELECT p.split, p.page_type, o.original_name FROM pages p "
+                                 "JOIN page_origins o ON o.page_id = p.id")
+        assert {r["page_type"] for r in rows} == {"1", "2"}
+        # the two pages of an act are always in the same split (no leak of the names)
+        acts = {}
+        for r in rows:
+            acts.setdefault(r["original_name"].split("-")[0], set()).add(r["split"])
+        assert all(len(splits) == 1 for splits in acts.values())
+        # every split has both types
+        for result in (report["coverage"], resplit(conn, log=lambda *_: None)["coverage"]):
+            assert all(set(result["page_types"][s]) == {"1", "2"} for s in ("train", "val", "test"))
+
+
+def test_augment_job_and_browse(env):
+    from mlops import augment, browse, db
+    with db.connection() as conn:
+        ingest_zip(conn, env, "b", [(f"03010108_1_{r}_I_2016_{a}-{s}-1", (r * 40, a * 30, s * 90))
+                                    for r in range(7) for a in range(2) for s in (1, 2)])
+        result = augment.run_augment(conn, {"args": {"copies": 1, "seed": 3}}, lambda *_: None, lambda: False, None)
+        train = db.one(conn, "SELECT count(*) AS n FROM pages WHERE split = 'train'")["n"]
+        assert result["pages"] == train and augment.augmentations()[0]["seed"] == "3"
+        # browse: the pages of a split, of a type, the augmented ones; a page with its lines drawn
+        options, note = browse.choices(conn, "train")
+        assert len(options) == train and all("03010108" not in label for label, _ in options)
+        assert all("page 1" in label for label, _ in browse.choices(conn, "test", "1")[0])
+        augmented, note = browse.choices(conn, browse.AUGMENTED)
+        assert len(augmented) == train and "_aug" in augmented[0][1]
+        image, text, xml, info = browse.show(options[0][1])
+        assert image.size == (200, 300) and "br-line" in text and "PcGts" in xml and "6 lines" in info
+        assert browse.show(augmented[0][1])[0] is not None
+        assert browse.step(options, options[-1][1], 1) == options[0][1]
+        import pytest as _pytest
+        with _pytest.raises(FileNotFoundError):
+            browse.resolve("../../etc/passwd.xml")
+
+
+def test_normalization():
+    from mlops import normalize
+    table = normalize.table()
+    assert table["\u00a0"] == " " and table["\u200b"] == ""
+    assert normalize.text("رسم\u00a0ولادة\u200b", table) == ("رسم ولادة", {"U+00A0": 1, "U+200B": 1})
+    page = ('<PcGts><TextLine id="a"><TextEquiv><Unicode>A\u00a0&amp;\u00a0B</Unicode></TextEquiv></TextLine>'
+            '<TextLine id="b"><TextEquiv><pc:Unicode>x&#160;y</pc:Unicode></TextEquiv></TextLine>'
+            '<Metadata>\u00a0kept</Metadata></PcGts>')
+    fixed, found = normalize.xml(page, table)
+    assert "<Unicode>A &amp; B</Unicode>" in fixed and "<pc:Unicode>x y</pc:Unicode>" in fixed
+    assert "\u00a0kept" in fixed and found == {"U+00A0": 3}                       # only the transcriptions
+    assert normalize.xml(fixed, table) == (fixed, {})
+
+
+def test_ingest_and_cli_normalize(env):
+    from mlops import db
+    from mlops.ingest import normalize_dataset
+    from mlops.pagexml import read_page
+    texts = ["رسم\u00a0ولادة", "في\u200bيوم", "عام", "سنة", "جماعة", "موافق"]
+    with db.connection() as conn:
+        folder = env / "src-n"
+        make_page(folder, "03010108_1_1_I_2016_1-1-1", (10, 20, 30), texts=texts)
+        batch = db.one(conn, "INSERT INTO batches DEFAULT VALUES RETURNING id")
+        from mlops.ingest import ingest
+        report = ingest(conn, batch["id"], make_zip(folder, env / "n.zip"), log=lambda *_: None)
+        assert report["normalized"] == {"U+00A0": 1, "U+200B": 1}
+        page = db.one(conn, "SELECT * FROM pages")
+        stored = env / "data" / "pages" / f'{page["id"]}.xml'
+        assert [line["text"] for line in read_page(stored)["lines"]][:2] == ["رسم ولادة", "فييوم"]
+        # a page already in the dataset with a no-break space (ingested before the setting existed)
+        stored.write_text(stored.read_text(encoding="utf-8").replace("عام", "عام\u00a0x"), encoding="utf-8")
+        (env / "data" / "augmented" / "old").mkdir(parents=True)
+        assert normalize_dataset(conn, log=lambda *_: None) == {"U+00A0": 1}
+        assert "\u00a0" not in stored.read_text(encoding="utf-8") and not (env / "data" / "augmented").exists()
+        assert normalize_dataset(conn, log=lambda *_: None) == {}
 
 
 def test_dataset_versions(env):
@@ -250,6 +374,33 @@ def test_the_app_builds(env):
     assert ui.build_app() is not None
     assert [row[0] for row in ui.dataset_table()] == ["train", "val", "test"]
     assert "CPU" in ui.server_html()
+
+
+def test_vocabulary(env):
+    from collections import Counter
+    from mlops import db, vocabulary
+    with db.connection() as conn:
+        ingest_zip(conn, env, "voc", [("03010108_1_1_I_2016_1", (10, 20, 30))])
+        by_split = vocabulary.vocabulary(conn)
+    total = sum(by_split.values(), Counter())
+    assert total["ر"] > 0 and " " in total
+    page = vocabulary.vocabulary_html(by_split)
+    assert "voc-cell" in page and "␣" in page and f"{len(total)}</b> distinct" in page
+    # red under the threshold, dashed when not in train, combining marks on a dotted circle
+    page = vocabulary.vocabulary_html({"train": Counter({"a": 100, "\u064e": 3}), "val": Counter({"b": 2}),
+                                       "test": Counter()})
+    assert page.count("voc-rare'") + page.count("voc-rare voc") == 2 and "voc-no-train" in page
+    assert "◌\u064e" in page and "LATIN SMALL LETTER B (U+0062) — train 0 · val 2 · test 0" in page
+    # the split summary (as printed by ingest / resplit) and the text copied by the Copy button
+    by_split = {"train": Counter({"a": 100, "b": 5}), "val": Counter({"b": 2}), "test": Counter({"a": 9})}
+    types = {"train": Counter({"1": 3, "2": 5}), "val": Counter({"1": 1}), "test": Counter({"2": 1})}
+    summary = vocabulary.coverage_html(by_split, types)
+    assert "characters missing from this split" in summary and "missing: train 0, val 1 (&#x27;a&#x27;)" in summary
+    page = vocabulary.vocabulary_html(by_split, "all")
+    assert "id='voc-tsv'" in page and "characters missing" not in page
+    tsv = vocabulary.vocabulary_tsv(by_split).splitlines()                          # what the copy button copies
+    assert tsv[0].split("\t") == ["character", "code", "name", "total", "train", "val", "test"]
+    assert tsv[1].split("\t") == ["a", "U+0061", "LATIN SMALL LETTER A", "109", "100", "0", "9"]
 
 
 def test_ketos_metrics_reach_wandb_through_tensorboard(tmp_path, monkeypatch):

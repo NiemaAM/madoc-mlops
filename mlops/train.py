@@ -11,7 +11,7 @@ import sys
 from importlib.metadata import PackageNotFoundError, version as package_version
 
 from mlops import datasets, db, release
-from mlops.augment import augment
+from mlops.augment import augmented_paths
 from mlops.config import params, path
 from mlops.kraken_output import best_checkpoint, stage, train_metrics
 from mlops.process import run
@@ -68,8 +68,10 @@ def train(conn, job, log, should_stop, set_wandb_url):
     out = path("runs") / task / f'job-{job["id"]}'
     out.mkdir(parents=True, exist_ok=True)
     train_paths = datasets.xml_paths(train_rows)
-    if task == "htr" and settings.get("use_augmented") and params()["augment"]["enabled"]:
-        train_paths += augment(version, train_rows, log, should_stop)
+    args = job["args"] or {}
+    use_augmented = args.get("use_augmented", settings.get("use_augmented")) and params()["augment"]["enabled"]
+    augmented = augmented_paths(version, train_rows, log, should_stop) if use_augmented else []
+    train_paths += augmented
     train_list = datasets.write_list(train_paths, out / "train.txt")
     val_list = datasets.write_list(datasets.xml_paths(val_rows), out / "val.txt")
     release.sync()
@@ -81,7 +83,7 @@ def train(conn, job, log, should_stop, set_wandb_url):
         project=wandb_settings["project"][task], entity=wandb_settings["entity"], job_type="train",
         name=f'{task}-job{job["id"]}',
         config={"task": task, "job": job["id"], "dataset_version": version["digest"], "pages": version["counts"],
-                "train_files": len(train_paths), "base_model": base["card"].get("artifact", "MaDoc models/"),
+                "train_files": len(train_paths), "augmented_pages": len(augmented), "base_model": base["card"].get("artifact", "MaDoc models/"),
                 "settings": settings, "augment": params()["augment"], "kraken": kraken_version(), "gpu": gpu_name()})
     set_wandb_url(run_.url)
     if base["card"].get("artifact"):

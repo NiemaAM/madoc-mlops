@@ -8,8 +8,21 @@ def local(tag):
     return tag.rsplit("}", 1)[-1]
 
 
+def points(text):
+    """"10,20 30,40" -> [(10.0, 20.0), (30.0, 40.0)] (malformed points are skipped)."""
+    out = []
+    for pair in (text or "").split():
+        x, _, y = pair.partition(",")
+        try:
+            out.append((float(x), float(y)))
+        except ValueError:
+            continue
+    return out
+
+
 def read_page(path):
-    """-> {"image": imageFilename, "width", "height", "lines": [{"baseline": bool, "coords": bool, "text": str}]}.
+    """-> {"image": imageFilename, "width", "height", "lines": [{"baseline": bool, "coords": bool, "text": str,
+    "baseline_points": [(x, y)], "polygon": [(x, y)]}]}.
     ValueError when the file is not a PageXML."""
     try:
         root = ET.parse(path).getroot()
@@ -31,6 +44,8 @@ def read_page(path):
             "baseline": "Baseline" in children and bool(children["Baseline"].get("points", "").strip()),
             "coords": "Coords" in children and bool(children["Coords"].get("points", "").strip()),
             "text": text,
+            "baseline_points": points(children["Baseline"].get("points")) if "Baseline" in children else [],
+            "polygon": points(children["Coords"].get("points")) if "Coords" in children else [],
         })
     return {
         "image": page.get("imageFilename", ""),

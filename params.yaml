@@ -24,12 +24,44 @@ ingest:
   # file name ("03010108_1_1_I_2016_162-2-1" -> "03010108_1_1_I_2016": commune, register, year); a name that
   # does not match is its own group. null: every page is its own group (split by page).
   group_pattern: '^(.+?_\d{4})_'
+  # the page type: the first capture on the original file name, "<register>_<year>_<act>-<page>-<n>":
+  # "03010108_1_1_I_2004_1-1-1" -> "1": page 1 of the act (names of the child and the parents, in Arabic and
+  # French, sometimes notes); "03010108_1_1_I_2004_1-2-1" -> "2": page 2 (the details).
+  # The two pages of an act share their register and year, so their group: same split, no leak of the names.
+  page_type_pattern: '-(\d+)-\d+$'
+  page_types: {"1": "page 1 (names)", "2": "page 2 (details)"}
+  # characters replaced in the transcriptions, at ingest and by "python -m mlops.cli normalize" (pages already in):
+  # invisible or look-alike characters the model cannot tell apart in the image. "" deletes the character.
+  normalize:
+    "U+00A0": " "                # no-break space
+    "U+202F": " "                # narrow no-break space
+    "U+2009": " "                # thin space
+    "U+200B": ""                 # zero-width space
+    "U+FEFF": ""                 # zero-width no-break space (byte order mark)
+    "U+200E": ""                 # left-to-right mark
+    "U+200F": ""                 # right-to-left mark
+    # "U+0640": ""               # Arabic tatweel (kashida): only if MaDoc's transcriptions never keep it
+  # the groups are placed to balance the CHARACTERS (mlops/splitting.py): val_fraction / test_fraction of all the
+  # characters, every character in train, val and test when the groups allow it, the same character distribution
+  # in every split. A split may differ from its share by split_tolerance of it (0.33: 15 % -> 10 % to 20 %).
   val_fraction: 0.15
   test_fraction: 0.15
+  split_tolerance: 0.33
+  # second priority of the split (after the tolerance, an empty split, a page type missing from a split):
+  # - missing_character: cost of a character of the dataset missing from a split (x3 when missing from train);
+  # - page_types: cost of a split being 1.0 away (relative) from its share of the pages of a type (test holding
+  #   30 % of the page 2 instead of 15 %). Page 2 weighs most: MaDoc extracts and structures its text, the
+  #   evaluation must hold its fair share of them.
+  split_weights:
+    missing_character: 100000
+    page_types: {"1": 0, "2": 3000}
+
+ui:
+  rare_characters: 50          # Data tab, vocabulary: a character seen fewer times is shown in red
 
 augment:
-  enabled: true                # HTR only: the train pages, never val / test
-  copies: 1
+  enabled: true                # the train pages only, never val / test (Data tab: "Augment the train pages")
+  copies: 1                    # the defaults of the Data tab and of a training that finds no augmentation
   seed: 42
 
 blla:
@@ -38,7 +70,7 @@ blla:
   resize: union
   # fine-tuning a model that is already good: a smaller learning rate than kraken's 2e-4, decreasing over 30 epochs
   extra_args: ["-r", "5e-5", "--schedule", "cosine", "--cos-max", "30"]
-  use_augmented: false
+  use_augmented: false         # default of the "use augmented pages" box of the Train tab
 
 htr:
   epochs: -1
@@ -46,7 +78,7 @@ htr:
   lag: 20
   resize: union                # keep the characters of the production model, add the new ones
   extra_args: []
-  use_augmented: true
+  use_augmented: true          # default of the "use augmented pages" box of the Train tab
 
 # a candidate is better when it wins on the SAME test pages (old + new), with a confidence interval computed by
 # resampling the pages (bootstrap): a gain that could be noise does not pass.

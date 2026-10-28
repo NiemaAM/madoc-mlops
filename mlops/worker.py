@@ -16,6 +16,7 @@ import traceback
 from pathlib import Path
 
 from mlops import db, jobs, release
+from mlops.augment import run_augment
 from mlops.config import path
 from mlops.evaluate import evaluate
 from mlops.ingest import ingest
@@ -61,7 +62,7 @@ def run_release(conn, job, log, should_stop, set_wandb_url):
     return {"pr_url": url}
 
 
-HANDLERS = {"ingest": run_ingest, "train": train, "evaluate": evaluate, "release": run_release}
+HANDLERS = {"ingest": run_ingest, "augment": run_augment, "train": train, "evaluate": evaluate, "release": run_release}
 
 
 def heartbeat_loop(state, stop):

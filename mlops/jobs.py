@@ -8,7 +8,7 @@ import time
 
 from mlops import db
 
-KINDS = ("ingest", "train", "evaluate", "release")
+KINDS = ("ingest", "augment", "train", "evaluate", "release")
 
 
 def enqueue(conn, kind, task=None, **args):

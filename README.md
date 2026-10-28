@@ -36,7 +36,7 @@ links between them are the shared GPU, the `madoc-shared` network (to unload Gem
 | Step | Details |
 |---|---|
 | Ingest | Every page is checked (image, size, lines, baselines, transcription). It is renamed to an opaque id (start of the SHA-256 of its image): the original file name, which identifies a real record, is only in the private table `page_origins`. This is pseudonymisation, not anonymisation: the images and the texts still show names and dates, so the data stays personal data and stays on this machine. |
-| Split | By group: the pages of the same register and year (from the original file name, `params.yaml: ingest.group_pattern`) land in the same split. A test page is never a near-copy of a train page; a group keeps its split forever. New groups go to the split furthest below its share of the pages (70 / 15 / 15), largest group first, so no split stays empty even with few registers. |
+| Split | By group: the pages of the same register and year (from the original file name, `params.yaml: ingest.group_pattern`) land in the same split. A test page is never a near-copy of a train page; a group keeps its split forever. New groups are placed to balance the **characters and page types** (`mlops/splitting.py`): 70 / 15 / 15 of the characters (± `split_tolerance`), both page types in every split with each split holding its share of the page 2 (± `split_tolerance`; page 2 weighs most, `split_weights`), every character in train, val and test whenever the groups allow it (missing from train weighs most), and the same character distribution in every split. No split stays empty, even with few registers. The ingest log reports the coverage. |
 | Dataset version | When a job starts, the pages and their splits are frozen into a version (`dataset_versions`). A model records the version it was trained on, an evaluation the version of its test pages. |
 | Augmentation | `script/data_augmentation_xml.py` (augraphy), train pages only, made once per version and reused. |
 | Train | Fine-tunes MaDoc's production model with ketos until early stopping; metrics live in W&B; the best checkpoint is exported and registered in W&B (alias `candidate`) and in the database. |
@@ -183,16 +183,61 @@ Check the **groups** column: a split is only as varied as its groups. With few r
 register-years), validation and test each hold one or two registers: their numbers then say how the model does
 on *those* registers. Adding exports of other registers or years improves the evaluation as much as the training.
 
-To split the whole dataset again (balanced by group size, e.g. after importing with `--split`, or after an older
-version of the platform), **before the first training**:
+To split the whole dataset again (balanced on the characters, e.g. after importing with `--split`, or after an
+older version of the platform), **before the first training**:
 
 ```bash
 docker compose exec mlops-ui python -m mlops.cli resplit
 ```
 
+It prints the pages and groups per split, the share of the characters of each split, the characters missing
+from each split and the page types of each split. A character found in fewer than 3 groups cannot be in every split: it is kept in train. The
+**Vocabulary** of the Data tab shows the same per character.
+
 The dataset versions already made keep their own splits, so models trained before stay traceable, but their
 evaluations are no longer comparable with the new test set. Do not import `train/all`: it holds your old augmented copies, the platform augments by
 itself.
+
+### Page types
+
+The certificates have two pages: `03010108_1_1_I_2004_1-1-1` is page 1 (names of the child and the parents, in
+Arabic and French, sometimes notes), `03010108_1_1_I_2004_1-2-1` is page 2 (the other details). The type is read
+from the original file name (`params.yaml: ingest.page_type_pattern`: the number after the act) and shown in **Data** (pages of each type per
+split) and **Browse**. Both pages of an act are in the same register and year, so in the same group and the same
+split: the names on page 1 never leak from train into test. The split also places the groups so every split has
+both types in the same proportion. Pages ingested before this version get their type when the app starts
+(from `page_origins`); run `resplit` to balance them. After changing `page_type_pattern`, clear the types first:
+`docker compose exec db psql -U mlops -d mlops -c "UPDATE pages SET page_type = NULL;"`, then restart `mlops-ui`.
+
+### Normalisation of the transcriptions
+
+Some characters look exactly like others in the image: a no-break space (U+00A0) like a space, a zero-width
+space or a direction mark like nothing at all. The model cannot tell them apart, so each one in the ground truth
+is an error it learns. `params.yaml: ingest.normalize` lists them with their replacement; every ingest applies it
+to the `<Unicode>` texts (the batch report counts the replacements). For the pages already in the dataset:
+
+```bash
+docker compose exec mlops-ui python -m mlops.cli normalize
+```
+
+It rewrites the XML of the pages concerned, updates their character counts and deletes the augmented pages (made
+again from the new texts). The **Vocabulary** shows invisible characters as `U+XXXX`: add the ones you find to the
+table. Dataset versions made before keep their page lists, but read the normalised texts: train again rather than
+comparing with older runs. Fix them in eScriptorium too, so the next export is clean.
+
+### Augmentation
+
+**Data → Augmentation of the train pages**: copies and seed, then "Augment the train pages" queues an `augment`
+job. Only the train pages of the current dataset version are augmented; val and test stay real. In **Train**, the
+box "with the augmented train pages" (default from `params.yaml: <task>.use_augmented`) adds the newest
+augmentation of the version to the training (made with `params.yaml: augment` if there is none). The geometry of
+the lines follows the image, so the augmented pages serve blla as well as HTR. **Browse → augmented** shows them.
+
+### Browse
+
+**Browse** shows the pages of a split (or the augmented ones), filtered by page type: the image with its line
+polygons (blue) and baselines (red, numbered), the transcription line by line, and the PageXML. Pages are shown by
+their id; the original names never reach the app.
 
 ### 8. The first cycle
 
@@ -227,6 +272,7 @@ What to watch: in **Compare & release**, the gain on the *old* test pages (the m
 | update the platform | check **Jobs** that nothing is running (a restarted worker marks its job failed), then `git pull && docker compose up -d --build` |
 | stop / start | `docker compose stop` / `docker compose start` (the data stays in the volumes) |
 | backup | `scripts/backup.sh /media/<encrypted-disk>/madoc-mlops-backup` (database dump + pages) |
+| normalise the transcriptions | `docker compose exec mlops-ui python -m mlops.cli normalize` (after editing `ingest.normalize`) |
 | split every group again | `docker compose exec mlops-ui python -m mlops.cli resplit` (before the first training) |
 
 **Backups.** The database and the `data` volume are the only copy of the dataset and of the private table of
@@ -274,7 +320,7 @@ MLOPS_TEST_DATABASE_URL=postgresql://mlops:test@127.0.0.1:5433/mlops_test python
 ```
 
 GitHub Actions runs them on every push (`.github/workflows/tests.yml`, with a PostgreSQL service). They cover the
-checks and the pseudonymisation of the ingestion, the split by group (balanced, never an empty split), the dataset versions, the job queue and its
+checks and the pseudonymisation of the ingestion, the split by group (balanced on the characters, every character in every split when possible, never an empty split), the dataset versions, the job queue and its
 cancellation, the gate and the whole flow (upload → ingest → train → evaluate → pull request) with the worker.
 
 ## Files
@@ -290,8 +336,12 @@ madoc-mlops/
 │   ├── worker.py             the job loop, heartbeat, cancellation
 │   ├── jobs.py               the queue (PostgreSQL, SKIP LOCKED) and the job logs
 │   ├── ingest.py             checks, pseudonymisation, split by group
+│   ├── normalize.py          the replacement of invisible / look-alike characters
+│   ├── splitting.py          the placement of the groups, balanced on the characters and page types
+│   ├── browse.py             the Browse tab (pages by split, lines drawn, PageXML)
+│   ├── vocabulary.py         the characters of the dataset (Data tab)
 │   ├── datasets.py           dataset versions
-│   ├── augment.py            augmentation of the train pages of a version
+│   ├── augment.py            augmentation of the train pages of a version (augment job)
 │   ├── train.py              training job (ketos, W&B)
 │   ├── evaluate.py           evaluation job, per-page metrics, the gate
 │   ├── release.py            the production models (MaDoc clone) and the pull request

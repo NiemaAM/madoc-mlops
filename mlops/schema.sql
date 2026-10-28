@@ -21,6 +21,9 @@ CREATE TABLE IF NOT EXISTS pages (
     created_at  timestamptz NOT NULL DEFAULT now()
 );
 
+-- page 1 (names) or page 2 (details) of an act, from the original file name (ingest.page_type_pattern)
+ALTER TABLE pages ADD COLUMN IF NOT EXISTS page_type text;
+
 -- PRIVATE: the original file names (they identify real records). Read by nothing but a person who needs to find
 -- a page in eScriptorium again; never logged, never sent to W&B.
 CREATE TABLE IF NOT EXISTS page_origins (

@@ -13,9 +13,10 @@ from pathlib import Path
 
 import gradio as gr
 
-from mlops import db, jobs
+from mlops import augment, browse, db, jobs
 from mlops.config import SPLITS, TASKS, params, path
 from mlops.resources import gpu_stats, host_stats
+from mlops.vocabulary import coverage_html, page_types, vocabulary, vocabulary_html
 
 TASK_NAMES = {"blla": "segmentation (blla)", "htr": "recognition (HTR)"}
 STATUS_ICON = {"queued": "⏳", "running": "▶", "done": "✓", "failed": "✗", "cancelled": "■"}
@@ -45,11 +46,50 @@ def fmt_metrics(metrics, keys=None):
 
 # --- data ---------------------------------------------------------------------------------------------------
 def dataset_table():
-    rows = query("SELECT split, count(*) AS pages, sum(lines) AS lines, sum(characters) AS characters, "
-                 "count(DISTINCT group_key) AS groups FROM pages GROUP BY split")
+    from mlops.ingest import backfill_page_types
+    with db.connection() as conn:
+        backfill_page_types(conn)
+        rows = db.all_rows(conn, "SELECT split, count(*) AS pages, sum(lines) AS lines, sum(characters) AS characters, "
+                                 "count(DISTINCT group_key) AS groups, count(*) FILTER (WHERE page_type = '1') AS p1, "
+                                 "count(*) FILTER (WHERE page_type = '2') AS p2 FROM pages GROUP BY split")
     by_split = {r["split"]: r for r in rows}
-    return [[s, *(int((by_split.get(s) or {}).get(k) or 0) for k in ("pages", "groups", "lines", "characters"))]
+    return [[s, *(int((by_split.get(s) or {}).get(k) or 0) for k in ("pages", "p1", "p2", "groups", "lines", "characters"))]
             for s in SPLITS]
+
+
+def augmentations_md():
+    found = augment.augmentations()
+    if not found:
+        return "No augmented pages yet."
+    return "\n".join(f"- `{a['folder'].name}`: {a['pages']} pages ({a['copies']} copies, seed {a['seed']})"
+                     + (" (newest, used by the trainings of this version)" if i == 0 else "")
+                     for i, a in enumerate(found))
+
+
+def vocabulary_view(scope="all"):
+    with db.connection() as conn:
+        by_split = vocabulary(conn)
+        return coverage_html(by_split, page_types(conn)), vocabulary_html(by_split, scope or "all")
+
+
+COPY_LABEL = "⧉"
+# copies the vocabulary table (tab-separated: pastes as a table in a spreadsheet): character, code, name, total and
+# count per split. The clipboard API needs https or localhost; otherwise the older execCommand("copy").
+COPY_VOCABULARY_JS = """
+() => {
+  const text = document.querySelector('#voc-tsv')?.value || '';
+  const button = [...document.querySelectorAll('button.custom-button')].find(b => b.title === '%s');
+  const done = (ok) => { if (!button) return; button.title = ok ? 'Copied' : 'Not copied';
+    button.style.outline = ok ? '2px solid #16a34a' : '2px solid #dc2626';
+    setTimeout(() => { button.style.outline = ''; button.title = '%s'; }, 1200); };
+  const fallback = () => { const area = document.createElement('textarea'); area.value = text;
+    document.body.appendChild(area); area.select(); let ok = false; try { ok = document.execCommand('copy'); } catch (e) {}
+    area.remove(); done(ok); };
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(() => done(true), fallback);
+  } else { fallback(); }
+}
+""" % (COPY_LABEL, COPY_LABEL)
 
 
 def batches_table():
@@ -196,10 +236,35 @@ def build_app():
                                  type="filepath")
                 ingest_button = gr.Button("Ingest", variant="primary", scale=0)
             gr.Markdown("**Dataset now** (pages are split by group: register and year)")
-            dataset_view = gr.Dataframe(headers=["split", "pages", "groups", "lines", "characters"],
+            dataset_view = gr.Dataframe(headers=["split", "pages", "page 1 (names)", "page 2 (details)", "groups",
+                                                 "lines", "characters"],
                                         value=dataset_table, interactive=False)
-            gr.Markdown("**Batches** (one per uploaded zip)")
-            batches_view = gr.Dataframe(headers=["batch", "uploaded", "status", "train", "val", "test",
+            with gr.Accordion("Vocabulary (every character of the transcriptions and its count)", open=True):
+                with gr.Row(equal_height=True):
+                    vocabulary_scope = gr.Radio(["all", *SPLITS], value="all", label="Pages", scale=3)
+                    vocabulary_refresh = gr.Button("🔄 Refresh", scale=0)
+                gr.Markdown("Red: fewer than `ui.rare_characters` occurrences (params.yaml), too rare to be learned "
+                            "well. Dashed: never in the train pages, so the model cannot learn it. Hover a "
+                            "character for its Unicode name and its count in each split.")
+                coverage_box = gr.HTML()
+                # copy: a button in the corner of the table, like the copy button of the other tables
+                vocabulary_copy = gr.Button(COPY_LABEL, size="sm", render=False)
+                vocabulary_box = gr.HTML(label="Characters", buttons=[vocabulary_copy], container=True, show_label=True)
+            with gr.Accordion("Augmentation of the train pages", open=False):
+                gr.Markdown("Noise, lighting, shadow, blur, scribbles, rotation and perspective, the lines of the "
+                            "PageXML moved with the image (script/data_augmentation_xml.py). Train pages only: "
+                            "val and test stay real. A training that uses augmented pages takes the newest "
+                            "augmentation of its dataset version.")
+                with gr.Row(equal_height=True):
+                    augment_copies = gr.Number(label="Copies of each train page", precision=0, minimum=1,
+                                               maximum=10, value=params()["augment"]["copies"], scale=1)
+                    augment_seed = gr.Number(label="Seed", precision=0, value=params()["augment"]["seed"], scale=1)
+                    augment_button = gr.Button("Augment the train pages", variant="primary", scale=1)
+                augmentations_view = gr.Markdown(augmentations_md)
+            gr.Markdown("**Batches** (one per uploaded zip; the splits as given at ingest: `resplit` may move "
+                        "groups later, the table above shows where the pages are now)")
+            batches_view = gr.Dataframe(headers=["batch", "uploaded", "status", "train at ingest", "val at ingest",
+                                                 "test at ingest",
                                                  "duplicates", "rejected", "reasons"],
                                         value=batches_table, interactive=False)
             gr.Markdown("**Dataset versions** (made when a job needs one: the exact pages of a training)")
@@ -207,10 +272,32 @@ def build_app():
                                          interactive=False)
         with gr.Tab("Train"):
             gr.Markdown("A training fine-tunes MaDoc's production model on the current dataset (logged live in W&B).")
+            train_buttons, use_augmented = {}, {}
             with gr.Row():
-                train_buttons = {task: gr.Button(f"Train {TASK_NAMES[task]}", variant="primary") for task in TASKS}
+                for task in TASKS:
+                    with gr.Column():
+                        train_buttons[task] = gr.Button(f"Train {TASK_NAMES[task]}", variant="primary")
+                        use_augmented[task] = gr.Checkbox(label="with the augmented train pages",
+                                                          value=bool(params()[task].get("use_augmented")))
             models_view = gr.Dataframe(headers=["model", "task", "status", "W&B artifact", "dataset version",
                                                 "validation", "created"], value=models_table, interactive=False)
+        with gr.Tab("Browse"):
+            with gr.Row(equal_height=True):
+                browse_split = gr.Radio([*SPLITS, browse.AUGMENTED], value="train", label="Pages", scale=3)
+                browse_type = gr.Dropdown(browse.type_choices(), value="all", label="Page type", scale=2)
+                browse_lines = gr.Checkbox(label="Draw the lines", value=True, scale=1)
+            browse_note = gr.Markdown()
+            browse_list = gr.State([])
+            with gr.Row(equal_height=True):
+                browse_previous = gr.Button("◀", scale=0, min_width=60)
+                browse_page = gr.Dropdown(label="Page", choices=[], value=None, scale=6)
+                browse_next = gr.Button("▶", scale=0, min_width=60)
+            browse_info = gr.Markdown()
+            with gr.Row():
+                browse_image = gr.Image(label="Image", type="pil", interactive=False, scale=3, height=760)
+                browse_text = gr.HTML(label="Transcription")
+            with gr.Accordion("PageXML", open=False):
+                browse_xml = gr.Code(language="html", interactive=False, lines=30, max_lines=30)
         with gr.Tab("Evaluate"):
             gr.Markdown("The candidate and the production model on the same test pages (old + new), live in W&B.")
             with gr.Row():
@@ -237,12 +324,36 @@ def build_app():
 
         # events
         ingest_button.click(on_upload, [upload], [upload, batches_view, jobs_view])
-        def on_train(task):
-            queue_job("train", task)
+        vocabulary_scope.change(vocabulary_view, [vocabulary_scope], [coverage_box, vocabulary_box])
+        vocabulary_refresh.click(vocabulary_view, [vocabulary_scope], [coverage_box, vocabulary_box])
+        app.load(vocabulary_view, [vocabulary_scope], [coverage_box, vocabulary_box])
+        vocabulary_copy.click(None, None, None, js=COPY_VOCABULARY_JS)
+        def on_train(task, augmented):
+            queue_job("train", task, use_augmented=bool(augmented))
             return jobs_table()
 
         for task, button in train_buttons.items():
-            button.click(lambda t=task: on_train(t), None, [jobs_view])
+            button.click(lambda augmented, t=task: on_train(t, augmented), [use_augmented[task]], [jobs_view])
+
+        def on_augment(copies, seed):
+            queue_job("augment", None, copies=int(copies or 1), seed=int(seed or 0))
+            return jobs_table()
+
+        augment_button.click(on_augment, [augment_copies, augment_seed], [jobs_view])
+
+        def browse_options(split, kind):
+            with db.connection() as conn:
+                options, note = browse.choices(conn, split, kind or "all")
+            first = options[0][1] if options else None
+            return gr.update(choices=options, value=first), options, note
+
+        browse_split.change(browse_options, [browse_split, browse_type], [browse_page, browse_list, browse_note])
+        browse_type.change(browse_options, [browse_split, browse_type], [browse_page, browse_list, browse_note])
+        app.load(browse_options, [browse_split, browse_type], [browse_page, browse_list, browse_note])
+        browse_page.change(browse.show, [browse_page, browse_lines], [browse_image, browse_text, browse_xml, browse_info])
+        browse_lines.change(browse.show, [browse_page, browse_lines], [browse_image, browse_text, browse_xml, browse_info])
+        browse_previous.click(lambda options, value: browse.step(options, value, -1), [browse_list, browse_page], [browse_page])
+        browse_next.click(lambda options, value: browse.step(options, value, 1), [browse_list, browse_page], [browse_page])
 
         def on_evaluate(model_id):
             if not model_id:
@@ -281,9 +392,10 @@ def build_app():
         gr.Timer(3).tick(job_log, [job_pick], [log_view])
         gr.Timer(5).tick(server_html, None, [server_view])
         gr.Timer(10).tick(lambda: [dataset_table(), batches_table(), versions_table(), models_table(),
-                                   evaluations_table(), jobs_table(),
+                                   evaluations_table(), jobs_table(), augmentations_md(),
                                    gr.update(choices=model_choices()), gr.update(choices=evaluation_choices())],
                           None, [dataset_view, batches_view, versions_view, models_view, evaluations_view, jobs_view,
+                                 augmentations_view,
                                  model_pick, evaluation_pick])
     return app
 
