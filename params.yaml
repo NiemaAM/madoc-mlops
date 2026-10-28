@@ -33,9 +33,11 @@ augment:
   seed: 42
 
 blla:
-  epochs: -1                   # until early stopping
+  epochs: -1                   # until early stopping (--quit early, after `lag` epochs without a better val_mean_iu)
+  lag: 5
   resize: union
-  extra_args: ["-ss", "20"]
+  # fine-tuning a model that is already good: a smaller learning rate than kraken's 2e-4, decreasing over 30 epochs
+  extra_args: ["-r", "5e-5", "--schedule", "cosine", "--cos-max", "30"]
   use_augmented: false
 
 htr:

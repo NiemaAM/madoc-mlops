@@ -39,7 +39,10 @@ def ketos_command(task, settings, base, train_list, val_list, out):
     else:
         cmd = [*ketos_program(), *device, "segtrain", "--load", base, "--resize", settings["resize"], "--output", out,
                "--format-type", "xml", "--training-data", train_list, "--evaluation-data", val_list,
-               "--epochs", settings["epochs"]]
+               "--epochs", settings["epochs"], "--lag", settings.get("lag", 10)]
+    # -q early: stop when the validation metric has not improved for --lag epochs. Needed for segtrain, whose
+    # default is "fixed" (with --epochs -1 it never stops); explicit for train too.
+    cmd += ["--quit", "early"]
     return [str(c) for c in cmd + list(settings.get("extra_args") or [])]
 
 
