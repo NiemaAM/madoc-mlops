@@ -53,8 +53,8 @@ ingest:
   #   30 % of the page 2 instead of 15 %). Page 2 weighs most: MaDoc extracts and structures its text, the
   #   evaluation must hold its fair share of them.
   split_weights:
-    missing_character: 100000
-    page_types: {"1": 0, "2": 3000}
+    missing_character: 2000
+    page_types: {"1": 2000, "2": 3000}
 
 ui:
   rare_characters: 50          # Data tab, vocabulary: a character seen fewer times is shown in red
@@ -76,7 +76,7 @@ htr:
   epochs: -1
   batch_size: 30
   lag: 20
-  resize: union                # keep the characters of the production model, add the new ones
+  resize: new
   extra_args: []
   use_augmented: true          # default of the "use augmented pages" box of the Train tab
 

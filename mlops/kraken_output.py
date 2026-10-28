@@ -94,8 +94,10 @@ def blla_report(report):
     if overall:
         metrics.update(precision=float(overall.group(1)), recall=float(overall.group(2)),
                        f1=float(overall.group(3)))
-    classes = [{"class": m.group(1), "precision": float(m.group(2)), "recall": float(m.group(3)),
-                "f1": float(m.group(4))} for m in CLASS_ROW.finditer(report) if m.group(1) != "Overall"]
-    iou = [{"category": m.group(1), "class": m.group(2), "pixel_accuracy": float(m.group(3)),
-            "iou": float(m.group(4))} for m in IOU_ROW.finditer(report)]
-    return {"metrics": metrics, "classes": classes, "iou": iou}
+    # ketos prints its tables more than once when its output is not a terminal: one row per class (the last)
+    classes = {m.group(1): {"class": m.group(1), "precision": float(m.group(2)), "recall": float(m.group(3)),
+                            "f1": float(m.group(4))} for m in CLASS_ROW.finditer(report) if m.group(1) != "Overall"}
+    iou = {(m.group(1), m.group(2)): {"category": m.group(1), "class": m.group(2),
+                                      "pixel_accuracy": float(m.group(3)), "iou": float(m.group(4))}
+           for m in IOU_ROW.finditer(report)}
+    return {"metrics": metrics, "classes": list(classes.values()), "iou": list(iou.values())}

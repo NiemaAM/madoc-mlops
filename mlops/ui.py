@@ -173,6 +173,11 @@ def evaluation_details(evaluation_id):
     for subset, label in (("old", "pages the production model was evaluated on"), ("new", "pages added since")):
         if c.get(subset):
             lines.append(f'- {label}: {c[subset]["pages"]} pages, mean gain {c[subset]["gain"]:+.4f}')
+    runs = c.get("wandb") or {}
+    links = [f"[{label}]({runs[key]})" for key, label in (("candidate", "candidate run"),
+                                                          ("production", "production run")) if runs.get(key)]
+    if links:
+        lines.append("\nW&B (one run per model, select both to compare): " + " · ".join(links))
     if e["pr_url"]:
         lines.append(f'\nPull request: {e["pr_url"]}')
     return "\n".join(lines)

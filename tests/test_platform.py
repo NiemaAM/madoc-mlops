@@ -17,6 +17,15 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 
 # --- without a database ------------------------------------------------------------------------------------
+def test_line_cer_ignores_the_order_of_the_lines():
+    from mlops.textmetrics import cer, line_cer
+    truth = ["رسم ولادة رقم", "في يوم عام", "جماعة خريبكة"]
+    assert line_cer(truth, list(reversed(truth))) == 0.0 and cer(truth, list(reversed(truth))) > 30
+    assert 0 < line_cer(truth, ["رسم ولادة رقم", "في يوم عام"]) < 100                 # a line missed
+    assert line_cer(truth, truth + ["x"]) > 0                                         # a line invented
+    assert line_cer([], []) == 0.0
+
+
 def test_text_metrics():
     assert cer(["رسم ولادة"], ["رسم ولادة"]) == 0
     assert cer(["abcd"], ["abed"]) == 25.0
@@ -86,6 +95,43 @@ def test_group_and_split():
     for split in ("val", "test"):
         share = sum(p2 for g, (_, p2) in pages.items() if splits[g] == split) / page2
         assert 0.10 <= share <= 0.20, (split, share)
+
+
+def test_evaluation_charts(tmp_path, monkeypatch):
+    import wandb
+    from mlops.eval_charts import log_model_run
+    from mlops.kraken_output import blla_report, htr_report
+    monkeypatch.setenv("WANDB_MODE", "offline")
+    monkeypatch.setenv("WANDB_SILENT", "true")
+    # the tables of a real `ketos segtest` (kraken 7.0.2), as the worker logs them
+    segtest = ("│ baselines │ default   │ 2         │ 2         │ 2424     │ 2424     │ ok     │\n"
+               "│ aux      │ _start_separator │ 0.997          │ 0.340 │ N/A          │\n"
+               "│ aux      │ _end_separator   │ 0.998          │ 0.344 │ N/A          │\n"
+               "│ Overall │ 0.995     │ 0.954  │ 0.974 │\n"
+               "│ default │ 0.995     │ 0.954  │ 0.974 │\n")
+    report = blla_report(segtest + segtest)                     # ketos prints its tables twice in a pipe
+    assert report["metrics"] == {"precision": 0.995, "recall": 0.954, "f1": 0.974}
+    assert report["classes"] == [{"class": "default", "precision": 0.995, "recall": 0.954, "f1": 0.974}]
+    assert [(r["class"], r["pixel_accuracy"], r["iou"]) for r in report["iou"]] == [
+        ("_start_separator", 0.997, 0.34), ("_end_separator", 0.998, 0.344)]       # not the counts table
+    pages = {"p1": {"e2e_word_f1": 0.9, "e2e_cer": 5.0}, "p2": {"e2e_word_f1": 0.8, "e2e_cer": 7.0}}
+    result = {"metrics": {**report["metrics"], "mean_e2e_word_f1": 0.85, "mean_e2e_cer": 6.0}, "pages": pages,
+              "report": report}
+    run = wandb.init(project="t", dir=str(tmp_path))
+    try:
+        keys = log_model_run("blla", result)                                       # one model per run
+        assert {"precision", "recall", "f1", "mean_e2e_word_f1", "precision_recall_f1", "pixel_accuracy_plot",
+                "iou_plot", "precision_recall_f1_table", "iou_table", "pages"} <= set(keys)
+        assert not any("candidate" in k or "production" in k for k in keys)
+        text = (FIXTURES / "ketos_test_report.txt").read_text(encoding="utf-8")
+        report = htr_report(text)
+        htr = {"metrics": {**report["metrics"], "mean_page_cer": 3.0}, "pages": {"p1": {"page_cer": 3.0}},
+               "report": report}
+        keys = log_model_run("htr", htr)
+        assert {"character_accuracy", "accuracy_comparison", "error_types", "CER_by_language", "language_accuracy",
+                "character_error_table", "metrics", "pages"} <= set(keys)
+    finally:
+        run.finish()
 
 
 def test_gate():
@@ -353,6 +399,8 @@ def test_whole_flow_with_the_worker(env, madoc_remote, monkeypatch):
         assert [e["passed"] for e in evaluations] == [True, True], [e["message"] for e in evaluations]
         assert evaluations[0]["comparison"]["metric"] == "page_cer" and evaluations[0]["comparison"]["gain"] > 0
         assert evaluations[1]["comparison"]["metric"] == "e2e_word_f1"
+        # one W&B run per model, in one group per evaluation
+        assert evaluations[1]["comparison"]["wandb"]["group"].startswith("blla-eval-job")
         jobs.enqueue(conn, "release", "htr", evaluation_id=evaluations[0]["id"])
         worker.main(once=True)
         release_job = db.one(conn, "SELECT * FROM jobs WHERE kind = 'release'")
@@ -447,7 +495,26 @@ def test_ketos_gets_a_tensorboard_logger(tmp_path, monkeypatch):
         monkeypatch.delitem(sys.modules, name)
     monkeypatch.setenv("MLOPS_TB_DIR", str(tmp_path / "tb"))
     from mlops import ketos_logged
+    monkeypatch.setattr(ketos_logged, "scalars_logger", lambda log_dir: ("scalars only", log_dir))
     ketos_logged.main()
     from kraken.train import utils
-    assert utils.made == [{"max_epochs": -1, "pl_logger": "tensorboard", "log_dir": str(tmp_path / "tb"),
-                           "log_every_n_steps": ketos_logged.LOG_EVERY_N_STEPS}]
+    assert utils.made == [{"max_epochs": -1, "pl_logger": ("scalars only", str(tmp_path / "tb")),
+                           "log_dir": str(tmp_path / "tb"), "log_every_n_steps": ketos_logged.LOG_EVERY_N_STEPS}]
+
+
+def test_the_logger_writes_numbers_but_no_images_or_texts(tmp_path):
+    """kraken writes validation lines as images / texts when the logger can (and crashes on add_text in 7.0.2):
+    the logger of mlops.ketos_logged cannot, but writes the metrics."""
+    pytest.importorskip("lightning")
+    from mlops.ketos_logged import scalars_logger
+    logger = scalars_logger(str(tmp_path))
+    assert getattr(logger.experiment, "add_image", None) is None
+    assert getattr(logger.experiment, "add_text", None) is None
+    logger.log_metrics({"val_accuracy": 0.9}, step=10)
+    logger.finalize("success")
+    events = list(tmp_path.rglob("events.out.tfevents.*"))
+    assert events
+    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+    accumulator = EventAccumulator(str(events[0]))
+    accumulator.Reload()
+    assert accumulator.Scalars("val_accuracy")[0].value == pytest.approx(0.9)

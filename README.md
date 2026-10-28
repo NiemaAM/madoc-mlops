@@ -344,6 +344,7 @@ madoc-mlops/
 │   ├── augment.py            augmentation of the train pages of a version (augment job)
 │   ├── train.py              training job (ketos, W&B)
 │   ├── evaluate.py           evaluation job, per-page metrics, the gate
+│   ├── eval_charts.py        the W&B charts of an evaluation (candidate and production side by side)
 │   ├── release.py            the production models (MaDoc clone) and the pull request
 │   ├── textmetrics.py        CER, words found, bootstrap
 │   ├── kraken_output.py      reading the output of ketos

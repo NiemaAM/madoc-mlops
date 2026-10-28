@@ -96,6 +96,10 @@ def comparison_markdown(evaluation):
     for subset in ("old", "new"):
         if c.get(subset):
             rows.append(f'- {subset} test pages ({c[subset]["pages"]}): gain {c[subset]["gain"]:+.3f}')
+    runs = c.get("wandb") or {}
+    links = [f"[{role} run]({runs[role]})" for role in ("candidate", "production") if runs.get(role)]
+    if links:
+        rows.append("\nW&B: " + " · ".join(links))
     return "\n".join(rows)
 
 

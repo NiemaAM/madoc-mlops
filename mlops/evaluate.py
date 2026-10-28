@@ -5,21 +5,25 @@ For each model:
   - a number per test page, to compare the two models page by page:
       htr   page_cer: the model reads the true lines of the page (the PageXML), CER against the transcription;
       blla  e2e_word_f1 / e2e_cer: the model segments the image, the production HTR reads its lines (as MaDoc
-            does), words found against the transcription (whatever the order of the lines).
+            does), words found and CER against the transcription, both whatever the order of the lines.
 The comparison is paired (same pages): the mean gain per page and its confidence interval (bootstrap), and the
 gain on the "old" test pages (those the production model was evaluated on) and on the "new" ones. The gate
 (params.yaml: gate) decides; the result is saved in the evaluations table, where the app shows it.
+
+W&B: one run per model (the candidate, the production model), in the same group, with the same keys and charts:
+select both runs in W&B to compare them. The verdict is in the app (Compare & release), not in W&B.
 """
 
 from bidi.algorithm import get_display
 
 from mlops import datasets, db, release
+from mlops.eval_charts import log_model_run
 from mlops.config import params, path
 from mlops.kraken_output import blla_report, htr_report
 from mlops.pagexml import read_page
 from mlops.process import run
 from mlops.resources import free_gpu
-from mlops.textmetrics import bootstrap, cer, word_f1
+from mlops.textmetrics import bootstrap, cer, line_cer, word_f1
 
 # for each task: the per-page metric of the gate and whether higher is better
 PAGE_METRICS = {"htr": ("page_cer", False), "blla": ("e2e_word_f1", True)}
@@ -58,7 +62,7 @@ def per_page(task, model_path, rows, out, log, should_stop, htr_for_blla=None):
             result[row["id"]] = {"page_cer": round(cer(expected, predicted), 4)}
         else:
             result[row["id"]] = {"e2e_word_f1": round(word_f1(expected, predicted), 4),
-                                 "e2e_cer": round(cer(expected, predicted), 4)}
+                                 "e2e_cer": round(line_cer(expected, predicted), 4)}
     return result
 
 
@@ -67,12 +71,13 @@ def evaluate_model(task, model_path, test_list, rows, out, log, should_stop, htr
     format_type = "page" if task == "htr" else "xml"
     command = ["ketos", "-d", params()["device"], "test" if task == "htr" else "segtest", "-m", model_path,
                "-f", format_type, "-e", test_list]
-    parsed = (htr_report if task == "htr" else blla_report)(run(command, log, should_stop))
+    text = run(command, log, should_stop)
+    parsed = (htr_report if task == "htr" else blla_report)(text)
     pages = per_page(task, model_path, rows, out, log, should_stop, htr_for_blla)
     metrics = dict(parsed["metrics"])
     for key in next(iter(pages.values()), {}):
         metrics[f"mean_{key}"] = round(sum(p[key] for p in pages.values()) / len(pages), 4)
-    return {"metrics": metrics, "pages": pages, "report": parsed}
+    return {"metrics": metrics, "pages": pages, "report": parsed, "text": text}
 
 
 def compare(task, candidate_pages, production_pages, old_ids):
@@ -98,28 +103,33 @@ def compare(task, candidate_pages, production_pages, old_ids):
     return comparison, True, f"{text}: better"
 
 
-def log_to_wandb(task, model, result, production_result, comparison, passed, message, version, run_):
+def model_run(task, role, name, artifact, project, group, config, compute, log):
+    """One W&B run for one model (role: candidate / production): its evaluation, its charts, its ketos report.
+    -> (result, run url)."""
     import wandb
-    summary = {f"candidate/{k}": v for k, v in result["metrics"].items()}
-    if production_result:
-        summary.update({f"production/{k}": v for k, v in production_result["metrics"].items()})
-    summary.update({f"comparison/{k}": v for k, v in comparison.items() if isinstance(v, (int, float))})
-    summary["comparison/passed"] = int(passed)
-    wandb.log(summary)
-    metric = comparison["metric"]
-    gains = wandb.Table(columns=["page", "candidate", "production"],
-                        data=[[i, result["pages"][i][metric], production_result["pages"][i][metric]]
-                              for i in sorted(result["pages"]) if production_result and i in production_result["pages"]])
-    wandb.log({"pages": gains})
-    if task == "htr" and result["report"].get("errors"):
-        wandb.log({"candidate/character_errors": wandb.Table(columns=["count", "correct", "generated"],
-                                                             data=[list(e) for e in result["report"]["errors"][:300]])})
-    run_.summary["verdict"] = message
+    settings = params()["wandb"]
+    run_ = wandb.init(project=project, entity=settings["entity"], job_type="eval", group=group, name=name,
+                      tags=[role, task], config={**config, "role": role, "model": artifact or "MaDoc models/"})
+    try:
+        if artifact:
+            try:   # lineage: this run evaluated that model
+                run_.use_artifact(f'{settings["entity"]}/{settings["project"][task]}/{artifact}')
+            except Exception as e:
+                log(f"W&B lineage skipped: {e}")
+        result = compute()
+        log_model_run(task, result)
+        report = wandb.Artifact(f"{group}-{role}", type="evaluation",
+                                metadata={"role": role, "model": artifact, **result["metrics"]})
+        with report.new_file(f"{'segmentation' if task == 'blla' else 'recognition'}_evaluation_report.txt",
+                             encoding="utf-8") as f:
+            f.write(result.get("text", ""))
+        run_.log_artifact(report)
+        return result, run_.url
+    finally:
+        wandb.finish()
 
 
 def evaluate(conn, job, log, should_stop, set_wandb_url):
-    import wandb
-
     task = job["task"]
     model = db.one(conn, "SELECT * FROM models WHERE id = %s", job["args"]["model_id"])
     if model is None or model["task"] != task:
@@ -137,42 +147,38 @@ def evaluate(conn, job, log, should_stop, set_wandb_url):
     old_version = datasets.by_digest(conn, production["card"].get("test_version"))
     old_ids = {r["id"] for r in datasets.pages(conn, old_version["id"], "test")} if old_version else set()
     free_gpu(log)
-    wandb_settings = params()["wandb"]
-    run_ = wandb.init(project=wandb_settings["eval_project"][task], entity=wandb_settings["entity"],
-                      job_type="eval", name=f'{task}-model{model["id"]}-vs-production',
-                      config={"task": task, "job": job["id"], "candidate": model["artifact"],
-                              "production": production["card"].get("artifact", "MaDoc models/"),
-                              "test_version": version["digest"], "test_pages": len(rows),
-                              "old_test_pages": len(old_ids)})
-    set_wandb_url(run_.url)
-    try:
-        try:
-            run_.use_artifact(f'{wandb_settings["entity"]}/{wandb_settings["project"][task]}/{model["artifact"]}')
-        except Exception as e:
-            log(f"W&B lineage skipped: {e}")
-        log("--- candidate")
-        result = evaluate_model(task, model["path"], test_list, rows, out / "candidate", log, should_stop,
-                                htr_for_blla)
-        wandb.log({f"candidate/{k}": v for k, v in result["metrics"].items()})
-        production_result = None
-        if production["path"].is_file():
-            log("--- production")
-            production_result = evaluate_model(task, production["path"], test_list, rows, out / "production", log,
-                                               should_stop, htr_for_blla)
-            comparison, passed, message = compare(task, result["pages"], production_result["pages"], old_ids)
-        else:
-            comparison = {"metric": PAGE_METRICS[task][0], "pages": len(rows), "gain": 0.0, "low": 0.0, "high": 0.0,
-                          "confidence": params()["gate"]["confidence"]}
-            passed, message = True, "no production model to compare with"
-        log(("PASS " if passed else "FAIL ") + message)
-        log_to_wandb(task, model, result, production_result, comparison, passed, message, version, run_)
-        evaluation = db.one(
-            conn, "INSERT INTO evaluations (job_id, task, model_id, test_version_id, production_card, candidate, "
-                  "production, comparison, passed, message) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
-                  "RETURNING id",
-            job["id"], task, model["id"], version["id"], db.json(production["card"]), db.json(result["metrics"]),
-            db.json(production_result["metrics"]) if production_result else None, db.json(comparison), passed,
-            message)
-        return {"evaluation_id": evaluation["id"], "passed": passed, "message": message}
-    finally:
-        wandb.finish()
+    # one W&B run per model, in the same group: select both in W&B to compare them
+    project = params()["wandb"]["eval_project"][task]
+    group = f"{task}-eval-job{job['id']}"
+    config = {"task": task, "job": job["id"], "test_version": version["digest"], "test_pages": len(rows),
+              "old_test_pages": len(old_ids)}
+    set_wandb_url(f'https://wandb.ai/{params()["wandb"]["entity"]}/{project}/groups/{group}')
+    log("--- candidate")
+    result, candidate_url = model_run(
+        task, "candidate", f'{task}-model{model["id"]}', model["artifact"], project, group, config,
+        lambda: evaluate_model(task, model["path"], test_list, rows, out / "candidate", log, should_stop,
+                               htr_for_blla), log)
+    production_result, production_url = None, None
+    if production["path"].is_file():
+        log("--- production")
+        production_result, production_url = model_run(
+            task, "production", f'{task}-production-job{job["id"]}', production["card"].get("artifact"), project,
+            group, config,
+            lambda: evaluate_model(task, production["path"], test_list, rows, out / "production", log,
+                                   should_stop, htr_for_blla), log)
+        comparison, passed, message = compare(task, result["pages"], production_result["pages"], old_ids)
+    else:
+        comparison = {"metric": PAGE_METRICS[task][0], "pages": len(rows), "gain": 0.0, "low": 0.0, "high": 0.0,
+                      "confidence": params()["gate"]["confidence"]}
+        passed, message = True, "no production model to compare with"
+    comparison["wandb"] = {"group": group, "candidate": candidate_url, "production": production_url}
+    log(("PASS " if passed else "FAIL ") + message)
+    evaluation = db.one(
+        conn, "INSERT INTO evaluations (job_id, task, model_id, test_version_id, production_card, candidate, "
+              "production, comparison, passed, message) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) "
+              "RETURNING id",
+        job["id"], task, model["id"], version["id"], db.json(production["card"]), db.json(result["metrics"]),
+        db.json(production_result["metrics"]) if production_result else None, db.json(comparison), passed,
+        message)
+    return {"evaluation_id": evaluation["id"], "passed": passed, "message": message,
+            "wandb": comparison["wandb"]}
