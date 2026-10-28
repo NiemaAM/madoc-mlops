@@ -421,9 +421,10 @@ def test_training_options_and_split_settings(env):
     from mlops.ingest import resplit
     from mlops.train import ketos_command
     with db.connection() as conn:
-        htr = settings.training(conn, "htr")                                   # params.yaml
-        assert htr["batch_size"] == 30 and htr["quit"] == "early" and "batch_size" not in settings.training(conn, "blla")
-        chosen = settings.clean("htr", {**htr, "epochs": "40", "lag": 7, "learning_rate": "1e-4", "schedule": "cosine",
+        htr = settings.training(conn, "htr")                                   # params.yaml, whatever its values
+        assert "batch_size" in htr and "batch_size" not in settings.training(conn, "blla")
+        chosen = settings.clean("htr", {**htr, "epochs": "40", "quit": "early", "lag": 7, "batch_size": 30,
+                                        "resize": "new", "learning_rate": "1e-4", "schedule": "cosine",
                                         "cos_max": 40, "kraken_augment": True, "extra_args": "--warmup 200"})
         settings.save(conn, "train.htr", chosen)
         assert settings.training(conn, "htr")["learning_rate"] == 1e-4           # saved from the app
