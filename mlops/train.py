@@ -65,7 +65,9 @@ def base_model(task, start_from):
     if folder not in path_.parents or path_.suffix != ".mlmodel":
         raise RuntimeError(f"{relative}: not a .mlmodel of MaDoc's repository")
     if not path_.is_file():
-        raise RuntimeError(f"no model {relative} in MaDoc's repository")
+        available = sorted(str(p.relative_to(folder)) for p in folder.rglob("*.mlmodel") if ".git" not in p.parts)
+        raise RuntimeError(f"no model {relative} in MaDoc's repository (renamed or removed?): choose another one "
+                           f"in the Train tab ('start from'). Models there now: {', '.join(available) or 'none'}")
     is_production = path_ == production["path"].resolve()
     return {"path": path_, "card": production["card"] if is_production else {}, "production": is_production,
             "relative": relative}

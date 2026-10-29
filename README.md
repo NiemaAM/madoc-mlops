@@ -320,7 +320,17 @@ crontab -e
 # 30 3 * * * cd /home/dil-station3/madoc-mlops && scripts/backup.sh /media/<encrypted-disk>/madoc-mlops-backup >> /home/dil-station3/mlops-backup.log 2>&1
 ```
 
-Restore the database: `docker compose exec -T db pg_restore -U mlops -d mlops --clean < mlops-<date>.dump`.
+Every run keeps a dated copy (the last 14): `db/mlops-<date>.dump` and `data/<date>/pages/`. The unchanged
+pages are hard links to the previous copy, so 14 copies take about the space of one, and a page deleted by mistake
+is still in the older copies. Restore the database and the pages of the same date:
+
+```bash
+docker compose exec -T db pg_restore -U mlops -d mlops --clean < <backup>/db/mlops-<date>.dump
+docker run --rm -v madoc-mlops_data:/data -v <backup>/data/<date>:/backup:ro alpine:3.20 \
+  sh -c 'apk add --no-cache rsync >/dev/null && rsync -a --delete /backup/pages/ /data/pages/'
+```
+
+Try a restore once on another machine (or a copy of the volumes): a backup never restored is not a backup yet.
 
 **The GPU.** MaDoc, Ollama and the worker share the 16 GB of the GPU. Before every job the worker unloads Gemma
 (Ollama reloads it at its next request: the app keeps working, a bit slower right after). Run trainings when

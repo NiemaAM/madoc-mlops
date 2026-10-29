@@ -154,6 +154,29 @@ def test_gate():
     assert compare("blla", words, {k: {"e2e_word_f1": 0.8} for k in words}, set())[1]  # higher is better
 
 
+def test_gate_by_group():
+    """Pages of a register are not independent: with few groups the interval stays by page and says so; with
+    enough groups it is computed by group, wider when the groups disagree."""
+    from mlops.evaluate import compare
+    from mlops.textmetrics import bootstrap, group_bootstrap
+    production = {f"p{i}": {"page_cer": 5.0} for i in range(40)}
+    better = {f"p{i}": {"page_cer": 4.0} for i in range(40)}
+    two = {f"p{i}": f"g{i % 2}" for i in range(40)}
+    comparison, passed, message = compare("htr", better, production, set(), two)
+    assert passed and comparison["interval"] == "by page" and comparison["groups"] == 2
+    assert "2 test groups only" in message and set(comparison["group_gains"]) == {"g0", "g1"}
+    # 8 groups: 6 gain a lot, 2 lose: by page it looks sure, by group it is not
+    eight = {f"p{i}": f"g{i % 8}" for i in range(40)}
+    mixed = {p: {"page_cer": 2.0 if int(eight[p][1]) < 6 else 12.0} for p in production}
+    comparison, passed, message = compare("htr", mixed, production, set(), eight)
+    assert comparison["interval"] == "by group" and comparison["groups"] == 8 and "interval by group" in message
+    gains = {p: production[p]["page_cer"] - mixed[p]["page_cer"] for p in production}
+    _, page_low, _ = bootstrap(list(gains.values()))
+    _, group_low, _ = group_bootstrap(gains, eight)
+    assert group_low < page_low and comparison["low"] == round(group_low, 4)
+    assert group_bootstrap({}, {}) == (0.0, 0.0, 0.0)
+
+
 # --- with the database -------------------------------------------------------------------------------------
 def ingest_zip(conn, tmp, name, pages, force_split=None):
     from mlops import db
@@ -452,6 +475,17 @@ def test_whole_flow_with_the_worker(env, madoc_remote, monkeypatch):
         assert evaluations[1]["comparison"]["metric"] == "e2e_word_f1"
         # one W&B run per model, in one group per evaluation
         assert evaluations[1]["comparison"]["wandb"]["group"].startswith("blla-eval-job")
+        assert evaluations[0]["comparison"]["groups"] >= 1 and "group_gains" in evaluations[0]["comparison"]
+        # the same production model on the same test pages: its numbers are reused, not computed again
+        jobs.enqueue(conn, "evaluate", "htr", model_id=models[0]["id"])
+        worker.main(once=True)
+        again = db.one(conn, "SELECT * FROM evaluations ORDER BY id DESC LIMIT 1")
+        assert again["production"] == evaluations[0]["production"]
+        assert db.one(conn, "SELECT count(*) AS n FROM job_logs WHERE line LIKE 'production numbers reused%%'")["n"] == 1
+        # a model renamed in MaDoc: the training says which ones exist
+        from mlops.train import base_model
+        with pytest.raises(RuntimeError, match="models/htr.mlmodel"):
+            base_model("htr", "models/base/htr_renamed.mlmodel")
         jobs.enqueue(conn, "release", "htr", evaluation_id=evaluations[0]["id"])
         worker.main(once=True)
         release_job = db.one(conn, "SELECT * FROM jobs WHERE kind = 'release'")
@@ -548,6 +582,27 @@ def test_a_paused_worker_takes_no_job(env):
         conn.execute("UPDATE jobs SET status = 'queued' WHERE id = %s", (job["id"],))
         settings.resume(conn)
         assert not settings.paused(conn)
+
+
+def test_the_commands_of_the_deployment(env, capsys):
+    """The exact command lines of .github/workflows/deploy.yml and of the README, through cli.main."""
+    from mlops import cli, db, settings
+    assert cli.main(["pause"]) == 0 and "paused" in capsys.readouterr().out
+    with db.connection() as conn:
+        assert settings.paused(conn)
+    assert cli.main(["wait-idle", "--timeout", "0"]) == 0 and "no job running" in capsys.readouterr().out
+    assert cli.main(["resume"]) == 0
+    with db.connection() as conn:
+        assert not settings.paused(conn)
+    assert cli.main(["health", "ui"]) == 0
+    assert cli.main(["health", "worker"]) == 1                       # no heartbeat yet
+    folder = env / "to-import"
+    make_page(folder, "X_2011_1-1-1", (10, 20, 30))
+    assert cli.main(["import", str(folder), "--split", "train"]) == 0
+    assert "ingest of" in capsys.readouterr().out
+    assert cli.main(["jobs"]) == 0 and "ingest" in capsys.readouterr().out
+    with pytest.raises(SystemExit):
+        cli.main(["import", str(env / "missing")])
 
 
 def test_the_app_builds(env):

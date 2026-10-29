@@ -14,6 +14,9 @@ W&B: one run per model (the candidate, the production model), in the same group,
 select both runs in W&B to compare them. The verdict is in the app (Compare & release), not in W&B.
 """
 
+import hashlib
+import json
+
 from bidi.algorithm import get_display
 
 from mlops import datasets, db, release
@@ -23,7 +26,7 @@ from mlops.kraken_output import blla_report, htr_report
 from mlops.pagexml import read_page
 from mlops.process import run
 from mlops.resources import free_gpu
-from mlops.textmetrics import bootstrap, cer, line_cer, word_f1
+from mlops.textmetrics import bootstrap, cer, group_bootstrap, line_cer, word_f1
 
 # for each task: the per-page metric of the gate and whether higher is better
 PAGE_METRICS = {"htr": ("page_cer", False), "blla": ("e2e_word_f1", True)}
@@ -80,22 +83,81 @@ def evaluate_model(task, model_path, test_list, rows, out, log, should_stop, htr
     return {"metrics": metrics, "pages": pages, "report": parsed, "text": text}
 
 
-def compare(task, candidate_pages, production_pages, old_ids):
-    """The paired comparison and the verdict of the gate -> (comparison, passed, message)."""
+def file_digest(file):
+    digest = hashlib.sha256()
+    with open(file, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def evaluation_key(task, model_path, rows, htr_for_blla):
+    """What an evaluation depends on: the model file, the test pages (their PageXML, so a normalisation counts),
+    the HTR model of the segmentation's end-to-end score, the device and kraken. Same key: same numbers."""
+    from importlib.metadata import PackageNotFoundError, version
+    try:
+        kraken = version("kraken")
+    except PackageNotFoundError:
+        kraken = "unknown"
+    parts = [task, file_digest(model_path), params()["device"], kraken]
+    if task == "blla":
+        parts.append(file_digest(htr_for_blla))
+    pages = path("data") / "pages"
+    parts += [row["id"] + ":" + file_digest(pages / (row["id"] + ".xml")) for row in rows]
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:24]
+
+
+def cached_evaluation(key, compute, log):
+    """The production model is evaluated again by every evaluation: the same model on the same pages gives the
+    same numbers, so they are kept (<runs>/eval-cache/<key>.json) and reused."""
+    file = path("runs") / "eval-cache" / f"{key}.json"
+    if file.is_file():
+        try:
+            result = json.loads(file.read_text(encoding="utf-8"))
+            log(f"production numbers reused (same model, same test pages: {file.name})")
+            return result
+        except (OSError, ValueError):
+            pass
+    result = compute()
+    file.parent.mkdir(parents=True, exist_ok=True)
+    file.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+    return result
+
+
+def compare(task, candidate_pages, production_pages, old_ids, groups=None):
+    """The paired comparison and the verdict of the gate -> (comparison, passed, message).
+
+    groups: {page: its group (register-year)}. With enough test groups (gate.group_bootstrap_min_groups) the
+    interval is computed by group; the gain of every group is reported either way."""
     settings = params()["gate"]
     rule = settings[task]
     metric, higher_is_better = PAGE_METRICS[task]
     ids = sorted(set(candidate_pages) & set(production_pages))
     gains = {i: (candidate_pages[i][metric] - production_pages[i][metric]) * (1 if higher_is_better else -1)
              for i in ids}
-    mean, low, high = bootstrap([gains[i] for i in ids], settings["bootstrap_samples"], settings["confidence"])
+    groups = groups or {}
+    group_gains = {}
+    for i in ids:
+        group_gains.setdefault(groups.get(i, i), []).append(gains[i])
+    by_group = len(group_gains) >= settings.get("group_bootstrap_min_groups", 5) and bool(groups)
+    if by_group:
+        mean, low, high = group_bootstrap(gains, groups, settings["bootstrap_samples"], settings["confidence"])
+    else:
+        mean, low, high = bootstrap([gains[i] for i in ids], settings["bootstrap_samples"], settings["confidence"])
     comparison = {"metric": metric, "higher_is_better": higher_is_better, "pages": len(ids), "gain": round(mean, 4),
-                  "low": round(low, 4), "high": round(high, 4), "confidence": settings["confidence"]}
+                  "low": round(low, 4), "high": round(high, 4), "confidence": settings["confidence"],
+                  "interval": "by group" if by_group else "by page", "groups": len(group_gains)}
+    if groups:   # the gain of each test group (its key is a hash: safe to show)
+        comparison["group_gains"] = {g: {"pages": len(v), "gain": round(sum(v) / len(v), 4)}
+                                     for g, v in sorted(group_gains.items())}
     for name, subset in (("old", [i for i in ids if i in old_ids]), ("new", [i for i in ids if i not in old_ids])):
         if subset and old_ids:
             comparison[name] = {"pages": len(subset), "gain": round(sum(gains[i] for i in subset) / len(subset), 4)}
     text = (f'{metric}: mean gain {mean:+.3f} per page, {int(100 * settings["confidence"])} % CI '
             f'[{low:+.3f}, {high:+.3f}] over {len(ids)} pages')
+    if groups:
+        text += (f" and {len(group_gains)} groups (interval by group)" if by_group else
+                 f" ({len(group_gains)} test groups only: the interval is by page and does not cover a new register)")
     if low <= rule["min_gain"]:
         return comparison, False, f"{text}: not better with confidence (the CI must be above {rule['min_gain']})"
     if comparison.get("old") and comparison["old"]["gain"] < -rule["max_old_drop"]:
@@ -185,9 +247,12 @@ def evaluate(conn, job, log, should_stop, set_wandb_url):
         production_result, production_url = model_run(
             task, "production", f'{task}-production-job{job["id"]}', production["card"].get("artifact"), project,
             group, config,
-            lambda: evaluate_model(task, production["path"], test_list, rows, out / "production", log,
-                                   should_stop, htr_for_blla), log)
-        comparison, passed, message = compare(task, result["pages"], production_result["pages"], old_ids)
+            lambda: cached_evaluation(
+                evaluation_key(task, production["path"], rows, htr_for_blla),
+                lambda: evaluate_model(task, production["path"], test_list, rows, out / "production", log,
+                                       should_stop, htr_for_blla), log), log)
+        comparison, passed, message = compare(task, result["pages"], production_result["pages"], old_ids,
+                                              {r["id"]: r["group_key"] for r in rows})
     else:
         comparison = {"metric": PAGE_METRICS[task][0], "pages": len(rows), "gain": 0.0, "low": 0.0, "high": 0.0,
                       "confidence": params()["gate"]["confidence"]}

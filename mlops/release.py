@@ -92,7 +92,8 @@ def comparison_markdown(evaluation):
             rows.append(f"| {key} | {production_metrics.get(key, '—')} | {value} |")
     c = evaluation["comparison"]
     rows += ["", f'**Gain on {c["metric"]}** (per test page, positive = better): {c["gain"]:+.3f}, '
-                 f'{int(100 * c["confidence"])} % CI [{c["low"]:+.3f}, {c["high"]:+.3f}] over {c["pages"]} pages']
+                 f'{int(100 * c["confidence"])} % CI [{c["low"]:+.3f}, {c["high"]:+.3f}] over {c["pages"]} pages'
+                 + (f' and {c["groups"]} register-years (interval {c.get("interval", "by page")})' if c.get("groups") else "")]
     for subset in ("old", "new"):
         if c.get(subset):
             rows.append(f'- {subset} test pages ({c[subset]["pages"]}): gain {c[subset]["gain"]:+.3f}')

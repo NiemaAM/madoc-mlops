@@ -101,6 +101,10 @@ htr:
 gate:
   bootstrap_samples: 2000
   confidence: 0.95
+  # the pages of one register-year are not independent (same clerk, same pen): with this many test groups or
+  # more, the interval is computed by drawing the GROUPS again (more honest); with fewer, by page, and the
+  # verdict says the interval does not cover a new register
+  group_bootstrap_min_groups: 5
   htr:
     metric: page_cer           # character error rate of each test page, with the true lines (lower is better)
     min_gain: 0.0              # the lower bound of the CI of (production - candidate) must be above this

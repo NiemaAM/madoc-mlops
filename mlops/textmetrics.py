@@ -53,6 +53,28 @@ def word_f1(truth_lines, predicted_lines):
     return 0.0 if common == 0 else 2 * precision * recall / (precision + recall)
 
 
+def group_bootstrap(gains, groups, samples=2000, confidence=0.95, seed=0):
+    """Paired bootstrap by group -> (mean, low, high). gains: {page: gain}; groups: {page: its group}. The groups
+    are drawn again with replacement (all the pages of a drawn group together), so pages that look alike are
+    not counted as independent evidence. The mean is the mean over the pages, as in bootstrap()."""
+    if not gains:
+        return 0.0, 0.0, 0.0
+    by_group = {}
+    for page, gain in gains.items():
+        by_group.setdefault(groups.get(page, page), []).append(gain)
+    totals = [(sum(values), len(values)) for values in by_group.values()]
+    rng = random.Random(seed)
+    k = len(totals)
+    means = []
+    for _ in range(samples):
+        drawn = [totals[rng.randrange(k)] for _ in range(k)]
+        means.append(sum(t for t, _ in drawn) / sum(n for _, n in drawn))
+    means.sort()
+    tail = (1 - confidence) / 2
+    return (sum(gains.values()) / len(gains), means[int(tail * samples)],
+            means[min(samples - 1, int((1 - tail) * samples))])
+
+
 def bootstrap(gains, samples=2000, confidence=0.95, seed=0):
     """Paired bootstrap of the mean gain per page -> (mean, low, high). gains[i]: how much better the candidate
     is on page i (positive: better). The pages are drawn again with replacement `samples` times."""

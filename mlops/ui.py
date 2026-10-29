@@ -215,6 +215,12 @@ def evaluation_details(evaluation_id):
     for subset, label in (("old", "pages the production model was evaluated on"), ("new", "pages added since")):
         if c.get(subset):
             lines.append(f'- {label}: {c[subset]["pages"]} pages, mean gain {c[subset]["gain"]:+.4f}')
+    if c.get("group_gains"):
+        lines.append(f'- by register-year ({c["groups"]} groups, interval {c.get("interval", "by page")}): '
+                     + ", ".join(f'{v["gain"]:+.4f} on {v["pages"]} pages' for v in c["group_gains"].values()))
+    excluded = {k: v for k, v in (c.get("excluded_pages") or {}).items() if v}
+    if excluded:
+        lines.append("- left out (seen in training): " + ", ".join(f"{v} by the {k}" for k, v in excluded.items()))
     runs = c.get("wandb") or {}
     links = [f"[{label}]({runs[key]})" for key, label in (("candidate", "candidate run"),
                                                           ("production", "production run")) if runs.get(key)]

@@ -27,4 +27,7 @@ jobs:
           cache: pip
           cache-dependency-path: requirements-ci.txt
       - run: pip install -r requirements-ci.txt
-      - run: python -m pytest -q
+      - name: Lint (undefined names, unused imports, syntax errors)
+        run: ruff check --select F,E9 mlops tests scripts script
+      - name: Tests, with the coverage of every module
+        run: python -m pytest -q --cov=mlops --cov-report=term
