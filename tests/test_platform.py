@@ -458,6 +458,23 @@ def test_training_options_and_split_settings(env):
         assert result["groups"]["val"] >= 2 and result["groups"]["test"] >= 2
 
 
+def test_missing_pages(env, capsys):
+    from mlops import db
+    from mlops.missing import print_report, report
+    with db.connection() as conn:
+        pages = [("03010108_1_1_I_2004_1-1-1", (10, 10, 10)), ("03010108_1_1_I_2004_1-2-1", (20, 20, 20)),  # complete
+                 ("03010108_1_1_I_2004_2-1-1", (30, 30, 30)),                                              # no page 2
+                 ("03010108_1_2_I_2005_7-2-1", (40, 40, 40))]                                              # no page 1
+        ingest_zip(conn, env, "m", pages)
+        data = report(conn)
+        assert data["03010108_1_1_I_2004"]["complete"] == 1
+        assert data["03010108_1_1_I_2004"]["missing"] == {"1": [], "2": ["03010108_1_1_I_2004_2-2-1"]}
+        assert data["03010108_1_2_I_2005"]["missing"] == {"1": ["03010108_1_2_I_2005_7-1-1"], "2": []}
+        print_report(conn, with_names=True)
+    printed = capsys.readouterr().out
+    assert "03010108_1_1_I_2004_2-2-1" in printed and "03010108_1_2_I_2005_7-1-1" in printed
+
+
 def test_a_paused_worker_takes_no_job(env):
     from mlops import cli, db, jobs, settings, worker
     with db.connection() as conn:
