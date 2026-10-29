@@ -308,6 +308,7 @@ What to watch: in **Compare & release**, the gain on the *old* test pages (the m
 | update the platform | check **Jobs** that nothing is running (a restarted worker marks its job failed), then `git pull && docker compose up -d --build` |
 | stop / start | `docker compose stop` / `docker compose start` (the data stays in the volumes) |
 | backup | `scripts/backup.sh /media/<encrypted-disk>/madoc-mlops-backup` (database dump + pages) |
+| acts with one page annotated | `docker compose exec mlops-ui python -m mlops.cli missing-pages --list` (the file names to annotate next) |
 | normalise the transcriptions | `docker compose exec mlops-ui python -m mlops.cli normalize` (after editing `ingest.normalize`) |
 | split every group again | `docker compose exec mlops-ui python -m mlops.cli resplit` (before the first training) |
 
@@ -372,6 +373,7 @@ madoc-mlops/
 │   ├── worker.py             the job loop, heartbeat, cancellation
 │   ├── jobs.py               the queue (PostgreSQL, SKIP LOCKED) and the job logs
 │   ├── ingest.py             checks, pseudonymisation, split by group
+│   ├── missing.py            the acts with only one of their two pages annotated
 │   ├── settings.py           the options chosen in the app (training, split), on top of params.yaml
 │   ├── normalize.py          the replacement of invisible / look-alike characters
 │   ├── splitting.py          the placement of the groups, balanced on the characters and page types
