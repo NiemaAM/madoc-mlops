@@ -2,24 +2,13 @@
 
 import re
 
-TRAIN_PATTERNS = {
-    "blla": {
-        "train_loss_step": r"train_loss_step:\s*([0-9.]+)",
-        "train_loss_epoch": r"train_loss_epoch:\s*([0-9.]+)",
-        "val_accuracy": r"val_accuracy:\s*([0-9.]+)",
-        "val_mean_acc": r"val_mean_acc:\s*([0-9.]+)",
-        "val_mean_iu": r"val_mean_iu:\s*([0-9.]+)",
-        "val_freq_iu": r"val_freq_iu:\s*([0-9.]+)",
-        "val_bl_f1": r"val_bl_f1:\s*([0-9.]+)",
-    },
-    "htr": {
-        "train_loss_step": r"train_loss_step:\s*([0-9.]+)",
-        "train_loss_epoch": r"train_loss_epoch:\s*([0-9.]+)",
-        "val_accuracy": r"val_accuracy:\s*([0-9.]+)",
-        "val_word_accuracy": r"val_word_accuracy:\s*([0-9.]+)",
-        "early_stopping": r"early_stopping:\s*(\d+)/\d+",
-    },
-}
+NUMBER = r"([0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?)"   # 0.973, 52.1, 4.5e-05 (a loss close to 0)
+LOSSES = ("train_loss_step", "train_loss_epoch")
+TRAIN_METRICS = {"blla": (*LOSSES, "val_accuracy", "val_mean_acc", "val_mean_iu", "val_freq_iu", "val_bl_f1"),
+                 "htr": (*LOSSES, "val_accuracy", "val_word_accuracy")}
+TRAIN_PATTERNS = {task: {name: re.compile(rf"\b{name}:\s*{NUMBER}") for name in names}
+                  for task, names in TRAIN_METRICS.items()}
+TRAIN_PATTERNS["htr"]["early_stopping"] = re.compile(r"early_stopping:\s*(\d+)/\d+")
 STAGE = re.compile(r"stage (\d+)/")
 CHECKPOINT_SCORE = re.compile(r"-(\d+\.\d+)\.ckpt$")
 
@@ -28,7 +17,7 @@ def train_metrics(task, line):
     """The metrics of one line of `ketos train` / `ketos segtrain` ({} when there is none)."""
     out = {}
     for name, pattern in TRAIN_PATTERNS[task].items():
-        match = re.search(pattern, line)
+        match = pattern.search(line)
         if match:
             out[name] = float(match.group(1))
     return out

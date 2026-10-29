@@ -37,6 +37,22 @@ def pages(conn, version_id, split):
                              "WHERE d.version_id = %s AND d.split = %s ORDER BY p.id", version_id, split)
 
 
+def seen_page_ids(conn, version_id):
+    """The pages a model trained on that version saw while training: its train and validation pages."""
+    if not version_id:
+        return set()
+    return {row["page_id"] for row in db.all_rows(
+        conn, "SELECT page_id FROM dataset_pages WHERE version_id = %s AND split IN ('train', 'val')", version_id)}
+
+
+def leaking_groups(conn, version_id):
+    """The groups of a version found in more than one split (a split by page, imported with --split and not
+    split again): a page of such a group in test has near-copies in train."""
+    return db.all_rows(conn, "SELECT p.group_key, count(DISTINCT d.split) AS splits, count(*) AS pages "
+                             "FROM dataset_pages d JOIN pages p ON p.id = d.page_id WHERE d.version_id = %s "
+                             "GROUP BY p.group_key HAVING count(DISTINCT d.split) > 1", version_id)
+
+
 def xml_paths(rows):
     folder = path("data") / "pages"
     return [str(folder / f'{row["id"]}.xml') for row in rows]

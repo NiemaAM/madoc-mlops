@@ -1,5 +1,6 @@
 """Reading the PageXML exported by eScriptorium (any PAGE version: the namespace is ignored)."""
 
+import math
 import re
 import xml.etree.ElementTree as ET
 
@@ -9,14 +10,16 @@ def local(tag):
 
 
 def points(text):
-    """"10,20 30,40" -> [(10.0, 20.0), (30.0, 40.0)] (malformed points are skipped)."""
+    """"10,20 30,40" -> [(10.0, 20.0), (30.0, 40.0)] (malformed points, "a,b" "nan,1" "inf,2", are skipped)."""
     out = []
     for pair in (text or "").split():
         x, _, y = pair.partition(",")
         try:
-            out.append((float(x), float(y)))
+            point = (float(x), float(y))
         except ValueError:
             continue
+        if all(math.isfinite(v) for v in point):
+            out.append(point)
     return out
 
 
@@ -47,12 +50,17 @@ def read_page(path):
             "baseline_points": points(children["Baseline"].get("points")) if "Baseline" in children else [],
             "polygon": points(children["Coords"].get("points")) if "Coords" in children else [],
         })
-    return {
-        "image": page.get("imageFilename", ""),
-        "width": int(float(page.get("imageWidth", 0) or 0)),
-        "height": int(float(page.get("imageHeight", 0) or 0)),
-        "lines": lines,
-    }
+    return {"image": page.get("imageFilename", ""), "width": size(page.get("imageWidth")),
+            "height": size(page.get("imageHeight")), "lines": lines}
+
+
+def size(value):
+    """imageWidth / imageHeight -> pixels; 0 when missing or not a size ("", "abc", "inf", "-5")."""
+    try:
+        number = float(value or 0)
+        return int(number) if number > 0 else 0
+    except (ValueError, OverflowError):
+        return 0
 
 
 def set_image_name(xml_text, name):

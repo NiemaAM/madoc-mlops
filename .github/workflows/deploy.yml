@@ -10,6 +10,9 @@ on:
     types: [completed]
   workflow_dispatch:            # "Run workflow" in the Actions tab: deploy the default branch now
 
+permissions:
+  contents: read                # the token of the run can read the repository, nothing else
+
 concurrency: deploy             # one deployment at a time; a newer push waits for the current one
 
 jobs:
@@ -25,10 +28,16 @@ jobs:
       BRANCH: ${{ github.event.repository.default_branch }}
     steps:
       - name: Update the code
+        env:
+          TOKEN: ${{ github.token }}   # this run's token (read access to this repository, only for this job)
         run: |
           cd ${{ env.DEPLOY_DIR }}
-          git fetch origin "$BRANCH"
-          git merge --ff-only "origin/$BRANCH"
+          # the repository is private: fetch with the token of the run, given to this one command only (nothing
+          # is saved in the clone's configuration)
+          AUTH=$(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)
+          git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $AUTH" \
+              fetch "https://github.com/${{ github.repository }}.git" "$BRANCH"
+          git merge --ff-only FETCH_HEAD
           git log -1 --oneline
       - name: Build the image
         run: |

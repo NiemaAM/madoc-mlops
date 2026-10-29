@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from conftest import make_page, make_zip
+from conftest import make_page, make_zip, page_xml
 from mlops.kraken_output import blla_report, htr_report, train_metrics
 from mlops.textmetrics import bootstrap, cer, word_f1
 
@@ -43,6 +43,11 @@ def test_ketos_reports():
     assert result["metrics"]["character_accuracy"] == 97.27 and result["errors"][0] == (371, "SPACE", "")
     assert blla_report("│ Overall │ 0.95 │ 0.93 │ 0.94 │")["metrics"] == {"precision": 0.95, "recall": 0.93, "f1": 0.94}
     assert train_metrics("htr", "stage 2/∞ val_accuracy: 0.95") == {"val_accuracy": 0.95}
+    # a loss close to 0 is printed with an exponent; val_bl_f1 has digits in its name
+    assert train_metrics("blla", "train_loss_step: 4.5e-05 val_bl_f1: 0.973 val_mean_iu: .17") == {
+        "train_loss_step": 4.5e-05, "val_bl_f1": 0.973, "val_mean_iu": 0.17}
+    assert train_metrics("htr", "early_stopping: 3/20 train_loss_epoch: 52.1") == {
+        "early_stopping": 3.0, "train_loss_epoch": 52.1}
 
 
 def test_group_and_split():
@@ -283,6 +288,16 @@ def test_augment_job_and_browse(env):
             browse.resolve("../../etc/passwd.xml")
 
 
+def test_read_page_odd_values(tmp_path):
+    from mlops.pagexml import points, read_page
+    assert points("1,2 nan,3 inf,4 a,b 5,6 7") == [(1.0, 2.0), (5.0, 6.0)]
+    page = tmp_path / "p.xml"
+    page.write_text(page_xml("p.jpg").replace('imageWidth="200"', 'imageWidth="inf"')
+                    .replace('imageHeight="300"', 'imageHeight="-3"'), encoding="utf-8")
+    result = read_page(page)
+    assert result["width"] == 0 and result["height"] == 0 and len(result["lines"]) == 6
+
+
 def test_normalization():
     from mlops import normalize
     table = normalize.table()
@@ -332,6 +347,35 @@ def test_dataset_versions(env):
         assert sum(len(datasets.pages(conn, first["id"], s)) for s in ("train", "val", "test")) == 10
 
 
+def test_evaluation_leaves_out_the_test_pages_a_model_trained_on(env):
+    """The split changed since the candidate was trained: its old train pages now in test are not used to judge
+    it, nor the pages the production model trained on (its card names its version)."""
+    import pytest
+    from mlops import datasets, db
+    from mlops.evaluate import unseen_test_pages
+    with db.connection() as conn:
+        ingest_zip(conn, env, "a", [(f"G{g}_2010_{i}-1", (g * 40, i * 20, 10)) for g in range(6) for i in range(3)])
+        before = datasets.snapshot(conn)
+        trained = datasets.seen_page_ids(conn, before["id"])
+        conn.execute("UPDATE pages SET split = 'train'")
+        all_train = datasets.snapshot(conn)
+        conn.execute("UPDATE pages SET split = 'test'")                          # everything in test now
+        rows = datasets.pages(conn, datasets.snapshot(conn)["id"], "test")
+        notes = []
+        kept, excluded = unseen_test_pages(conn, rows, {"dataset_version_id": None}, {}, notes.append)
+        assert len(kept) == 18 and excluded == {"candidate": 0, "production": 0} and not notes
+        kept, excluded = unseen_test_pages(conn, rows, {"dataset_version_id": before["id"]}, {}, notes.append)
+        assert {r["id"] for r in kept} == {r["id"] for r in rows} - trained
+        assert excluded["candidate"] == len(trained) > 0 and "candidate" in notes[0]
+        with pytest.raises(RuntimeError, match="every test page"):
+            unseen_test_pages(conn, rows, {"dataset_version_id": None}, {"dataset_version": all_train["digest"]},
+                              notes.append)
+        # a page-level split: the groups found in several splits are reported
+        assert datasets.leaking_groups(conn, before["id"]) == []
+        conn.execute("UPDATE pages SET split = 'train' WHERE id IN (SELECT id FROM pages ORDER BY id LIMIT 5)")
+        assert datasets.leaking_groups(conn, datasets.snapshot(conn)["id"])
+
+
 def test_job_queue(env):
     from mlops import db, jobs
     with db.connection() as a, db.connection() as b:
@@ -353,6 +397,13 @@ def test_job_queue(env):
         log("line 2\n")
         log.flush()
         assert jobs.tail(a, second["id"]) == "line 1\nline 2"
+
+
+def test_a_command_printing_bytes_that_are_not_utf8(tmp_path):
+    import sys
+    from mlops.process import run
+    out = run([sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'ok \\xff\\xfe end\\n')"], lambda _: None)
+    assert out.startswith("ok ") and out.rstrip().endswith("end")
 
 
 def test_cancel_stops_the_process(env):
@@ -440,6 +491,15 @@ def test_training_options_and_split_settings(env):
         assert settings.training(conn, "htr") == htr
         with pytest.raises(ValueError):
             settings.clean("htr", {**htr, "resize": "both"})
+        for key, value, message in (("lag", "abc", "lag: 'abc' is not a number"), ("lag", 0, "below 1"),
+                                    ("epochs", "inf", "finite"), ("batch_size", 2.5, "whole number"),
+                                    ("learning_rate", -1e-3, "above 0"), ("epochs", 0, "trains nothing"),
+                                    ("extra_args", "--x 'open", "extra_args")):
+            with pytest.raises(ValueError, match=message):
+                settings.clean("htr", {**htr, key: value})
+        with pytest.raises(ValueError, match="never stop"):
+            settings.clean("htr", {**htr, "quit": "fixed", "epochs": -1})
+        assert settings.clean("htr", {**htr, "quit": "fixed", "epochs": 30.0})["epochs"] == 30
         with pytest.raises(ValueError):
             settings.check_split({"val_fraction": 0.6, "test_fraction": 0.5, "split_tolerance": 0.3,
                                   "split_weights": {}})
@@ -456,6 +516,23 @@ def test_training_options_and_split_settings(env):
         settings.save(conn, "split", split)
         result = resplit(conn, log=lambda *_: None)                          # the saved settings
         assert result["groups"]["val"] >= 2 and result["groups"]["test"] >= 2
+
+
+def test_missing_pages(env, capsys):
+    from mlops import db
+    from mlops.missing import print_report, report
+    with db.connection() as conn:
+        pages = [("03010108_1_1_I_2004_1-1-1", (10, 10, 10)), ("03010108_1_1_I_2004_1-2-1", (20, 20, 20)),  # complete
+                 ("03010108_1_1_I_2004_2-1-1", (30, 30, 30)),                                              # no page 2
+                 ("03010108_1_2_I_2005_7-2-1", (40, 40, 40))]                                              # no page 1
+        ingest_zip(conn, env, "m", pages)
+        data = report(conn)
+        assert data["03010108_1_1_I_2004"]["complete"] == 1
+        assert data["03010108_1_1_I_2004"]["missing"] == {"1": [], "2": ["03010108_1_1_I_2004_2-2-1"]}
+        assert data["03010108_1_2_I_2005"]["missing"] == {"1": ["03010108_1_2_I_2005_7-1-1"], "2": []}
+        print_report(conn, with_names=True)
+    printed = capsys.readouterr().out
+    assert "03010108_1_1_I_2004_2-2-1" in printed and "03010108_1_2_I_2005_7-1-1" in printed
 
 
 def test_a_paused_worker_takes_no_job(env):

@@ -429,7 +429,7 @@ def build_app():
             try:
                 options = app_settings.clean(task, dict(zip(keys, values)))
             except ValueError as e:
-                raise gr.Error(str(e))
+                raise gr.Error(str(e)) from None
             with db.connection() as conn:
                 app_settings.save(conn, f"train.{task}", options)
             queue_job("train", task, settings=options, use_augmented=bool(options.get("use_augmented")))
@@ -459,7 +459,7 @@ def build_app():
             try:
                 split = split_from_form(*values)
             except ValueError as e:
-                raise gr.Error(str(e))
+                raise gr.Error(str(e)) from None
             with db.connection() as conn:
                 return split_html(resplit(conn, log=lambda *_: None, split=split, apply=False))
 
@@ -468,7 +468,7 @@ def build_app():
             try:
                 split = split_from_form(*values)
             except ValueError as e:
-                raise gr.Error(str(e))
+                raise gr.Error(str(e)) from None
             with db.connection() as conn:
                 if db.one(conn, "SELECT 1 AS x FROM jobs WHERE status IN ('queued', 'running') AND kind = 'ingest'"):
                     raise gr.Error("An ingest is queued or running: split again once it is done.")

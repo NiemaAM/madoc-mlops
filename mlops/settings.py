@@ -61,25 +61,50 @@ def default_training(task):
     return {k: v for k, v in out.items() if k in TASK_FIELDS[task]}
 
 
+# the smallest value of the numeric options (None: kraken's default); epochs -1 is "until early stopping"
+MINIMUM = {"epochs": -1, "lag": 1, "min_epochs": 0, "batch_size": 1, "cos_max": 1}
+
+
+def typed(key, value):
+    """One option from the app -> its type (empty -> None), or a ValueError that names the option."""
+    kind = TRAIN_FIELDS[key][0]
+    if value is None or (isinstance(value, str) and not value.strip() and kind is not str):
+        return None
+    if kind is bool:
+        return bool(value)
+    if kind is str:
+        return str(value).strip()
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{key}: {value!r} is not a number") from None
+    if number != number or number in (float("inf"), float("-inf")):
+        raise ValueError(f"{key}: {value!r} is not a finite number")
+    if kind is int:
+        if number != int(number):
+            raise ValueError(f"{key}: {value!r} is not a whole number")
+        number = int(number)
+    if key in MINIMUM and number < MINIMUM[key]:
+        raise ValueError(f"{key}: {number} is below {MINIMUM[key]}")
+    if key == "learning_rate" and number <= 0:
+        raise ValueError(f"{key}: {number} must be above 0")
+    return number
+
+
 def clean(task, values):
     """Values from the app -> typed values (empty -> None), only the fields of the task."""
-    out = {}
-    for key in TASK_FIELDS[task]:
-        value = values.get(key)
-        kind = TRAIN_FIELDS[key][0]
-        if value is None or (isinstance(value, str) and not value.strip() and kind is not str):
-            out[key] = None
-        elif kind is bool:
-            out[key] = bool(value)
-        elif kind is int:
-            out[key] = int(float(value))
-        elif kind is float:
-            out[key] = float(value)
-        else:
-            out[key] = str(value).strip()
-        if key in CHOICES and out[key] not in CHOICES[key] + [None]:
+    out = {key: typed(key, values.get(key)) for key in TASK_FIELDS[task]}
+    for key in CHOICES:
+        if key in out and out[key] not in CHOICES[key] + [None]:
             raise ValueError(f"{key}: {out[key]!r} is not one of {CHOICES[key]}")
-    shlex.split(out.get("extra_args") or "")   # a quote left open raises here, not in the job
+    if out.get("epochs") == 0:
+        raise ValueError("epochs: 0 trains nothing (-1: until early stopping)")
+    if out.get("quit") == "fixed" and (out.get("epochs") is None or out["epochs"] < 1):
+        raise ValueError("quit fixed runs `epochs` epochs: set epochs to 1 or more (with -1 it would never stop)")
+    try:
+        shlex.split(out.get("extra_args") or "")   # a quote left open raises here, not in the job
+    except ValueError as e:
+        raise ValueError(f"extra_args: {e}") from None
     return out
 
 

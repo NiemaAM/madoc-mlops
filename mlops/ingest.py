@@ -107,7 +107,7 @@ def check_page(xml_path, settings):
         return None, None, "too few lines"
     if any(not (line["baseline"] and line["coords"]) for line in lines):
         return None, None, "line without baseline or polygon"
-    if sum(1 for line in lines if line["text"]) / len(lines) < settings["min_text_ratio"]:
+    if not lines or sum(1 for line in lines if line["text"]) / len(lines) < settings["min_text_ratio"]:
         return None, None, "lines not transcribed"
     return page, image, None
 
@@ -174,7 +174,7 @@ def ingest(conn, batch_id, source, force_split=None, log=print):
             fixed_types[row["split"]][row["page_type"]] += 1
         known = {group: counter.most_common(1)[0][0] for group, counter in votes.items()}
         new_groups, new_types = {}, {}
-        for xml_path, page, image, digest, group, kind in candidates:
+        for _, page, _, _, group, kind in candidates:
             characters = Counter("".join(line["text"] for line in page["lines"]))
             if group in known:
                 fixed[force_split or known[group]].update(characters)
@@ -192,24 +192,11 @@ def ingest(conn, batch_id, source, force_split=None, log=print):
         for group, characters in new_groups.items():
             by_split[force_split or splits[group]].update(characters)
             types_by_split[force_split or splits[group]].update(new_types[group])
-        # 3. write the pages
-        for xml_path, page, image, digest, group, kind in candidates:
-            page_id = digest[:16]
-            split = force_split or splits[group]
-            image_name = page_id + image.suffix.lower()
-            shutil.copyfile(image, pages_dir / image_name)
-            xml_text, found = normalize.xml(xml_path.read_text(encoding="utf-8"), replacements)
-            normalized.update(found)
-            (pages_dir / f"{page_id}.xml").write_text(set_image_name(xml_text, image_name), encoding="utf-8")
-            lines = page["lines"]
-            conn.execute(
-                "INSERT INTO pages (id, sha256, batch_id, group_key, split, image_name, lines, characters, page_type) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-                (page_id, digest, batch_id, group, split, image_name, len(lines),
-                 sum(len(line["text"]) for line in lines), kind))
-            conn.execute("INSERT INTO page_origins (page_id, original_name) VALUES (%s, %s)",
-                         (page_id, str(xml_path.relative_to(folder))))
-            report["added"][split] += 1
+        # 3. write the pages, in one transaction: a batch that fails half-way adds no page (the files already
+        #    copied are written again by the next try)
+        with conn.transaction():
+            write_pages(conn, candidates, splits, force_split, batch_id, folder, pages_dir, replacements,
+                        normalized, report)
         report["rejected"] = sum(reasons.values())
         report["reasons"] = dict(reasons)
         report["new_groups"] = len(new_groups)
@@ -225,6 +212,27 @@ def ingest(conn, batch_id, source, force_split=None, log=print):
     finally:
         if temporary:
             shutil.rmtree(temporary, ignore_errors=True)
+
+
+def write_pages(conn, candidates, splits, force_split, batch_id, folder, pages_dir, replacements, normalized, report):
+    """Copy the checked pages into the dataset (opaque names) and record them (pages, page_origins)."""
+    for xml_path, page, image, digest, group, kind in candidates:
+        page_id = digest[:16]
+        split = force_split or splits[group]
+        image_name = page_id + image.suffix.lower()
+        shutil.copyfile(image, pages_dir / image_name)
+        xml_text, found = normalize.xml(xml_path.read_text(encoding="utf-8"), replacements)
+        normalized.update(found)
+        (pages_dir / f"{page_id}.xml").write_text(set_image_name(xml_text, image_name), encoding="utf-8")
+        lines = page["lines"]
+        conn.execute(
+            "INSERT INTO pages (id, sha256, batch_id, group_key, split, image_name, lines, characters, page_type) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (page_id, digest, batch_id, group, split, image_name, len(lines),
+             sum(len(line["text"]) for line in lines), kind))
+        conn.execute("INSERT INTO page_origins (page_id, original_name) VALUES (%s, %s)",
+                     (page_id, str(xml_path.relative_to(folder))))
+        report["added"][split] += 1
 
 
 def normalize_dataset(conn, log=print):

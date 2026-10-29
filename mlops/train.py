@@ -93,6 +93,11 @@ def train(conn, job, log, should_stop, set_wandb_url):
     val_rows = datasets.pages(conn, version["id"], "val")
     if not train_rows or not val_rows:
         raise RuntimeError(f"version {version['digest']}: no train or no validation pages")
+    leaking = datasets.leaking_groups(conn, version["id"])
+    if leaking:
+        log(f"WARNING: {len(leaking)} groups have pages in more than one split "
+            f"({sum(g['pages'] for g in leaking)} pages): the validation and test scores will be too optimistic. "
+            "Split the dataset again (Data tab, or python -m mlops.cli resplit) for a fair evaluation.")
     out = path("runs") / task / f'job-{job["id"]}'
     out.mkdir(parents=True, exist_ok=True)
     train_paths = datasets.xml_paths(train_rows)
@@ -110,7 +115,8 @@ def train(conn, job, log, should_stop, set_wandb_url):
         name=f'{task}-job{job["id"]}',
         config={"task": task, "job": job["id"], "dataset_version": version["digest"], "pages": version["counts"],
                 "train_files": len(train_paths), "augmented_pages": len(augmented), "base_model": base["card"].get("artifact") or base["relative"],
-                "settings": settings, "augment": params()["augment"], "kraken": kraken_version(), "gpu": gpu_name()})
+                "settings": settings, "augment": params()["augment"], "kraken": kraken_version(), "gpu": gpu_name(),
+                "leaking_groups": len(leaking)})
     set_wandb_url(run_.url)
     if base["card"].get("artifact"):
         try:   # lineage: this candidate comes from the production model

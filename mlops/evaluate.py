@@ -129,6 +129,26 @@ def model_run(task, role, name, artifact, project, group, config, compute, log):
         wandb.finish()
 
 
+def unseen_test_pages(conn, rows, model, production_card, log):
+    """The test pages neither model saw while training -> (rows, {"candidate": n, "production": n} excluded).
+
+    The split may have changed since a model was trained (split again, groups added): a page of the test set
+    now may have been a train or validation page then. Evaluated on it, the model would look better than it is,
+    so it is left out (for the production model too, when its card names its dataset version)."""
+    production_version = datasets.by_digest(conn, (production_card or {}).get("dataset_version"))
+    seen = {"candidate": datasets.seen_page_ids(conn, model.get("dataset_version_id")),
+            "production": datasets.seen_page_ids(conn, production_version["id"]) if production_version else set()}
+    excluded = {role: sum(1 for r in rows if r["id"] in ids) for role, ids in seen.items()}
+    kept = [r for r in rows if r["id"] not in seen["candidate"] | seen["production"]]
+    for role, n in excluded.items():
+        if n:
+            log(f"{n} test pages left out: the {role} model trained or was validated on them (split changed since)")
+    if not kept:
+        raise RuntimeError("every test page was seen in training by one of the models: split the dataset again "
+                           "or train the candidate on the current dataset version")
+    return kept, excluded
+
+
 def evaluate(conn, job, log, should_stop, set_wandb_url):
     task = job["task"]
     model = db.one(conn, "SELECT * FROM models WHERE id = %s", job["args"]["model_id"])
@@ -138,10 +158,11 @@ def evaluate(conn, job, log, should_stop, set_wandb_url):
     rows = datasets.pages(conn, version["id"], "test")
     if not rows:
         raise RuntimeError("the dataset has no test page")
-    out = path("runs") / task / f'job-{job["id"]}'
-    test_list = datasets.write_list(datasets.xml_paths(rows), out / "test.txt")
     release.sync()
     production = release.production(task)
+    rows, excluded = unseen_test_pages(conn, rows, model, production["card"], log)
+    out = path("runs") / task / f'job-{job["id"]}'
+    test_list = datasets.write_list(datasets.xml_paths(rows), out / "test.txt")
     htr_for_blla = release.production("htr")["path"]
     # the test pages the production model was evaluated on (its card): the "old" pages
     old_version = datasets.by_digest(conn, production["card"].get("test_version"))
@@ -151,7 +172,7 @@ def evaluate(conn, job, log, should_stop, set_wandb_url):
     project = params()["wandb"]["eval_project"][task]
     group = f"{task}-eval-job{job['id']}"
     config = {"task": task, "job": job["id"], "test_version": version["digest"], "test_pages": len(rows),
-              "old_test_pages": len(old_ids)}
+              "old_test_pages": len(old_ids), "excluded_test_pages": excluded}
     set_wandb_url(f'https://wandb.ai/{params()["wandb"]["entity"]}/{project}/groups/{group}')
     log("--- candidate")
     result, candidate_url = model_run(
@@ -172,6 +193,7 @@ def evaluate(conn, job, log, should_stop, set_wandb_url):
                       "confidence": params()["gate"]["confidence"]}
         passed, message = True, "no production model to compare with"
     comparison["wandb"] = {"group": group, "candidate": candidate_url, "production": production_url}
+    comparison["excluded_pages"] = excluded
     log(("PASS " if passed else "FAIL ") + message)
     evaluation = db.one(
         conn, "INSERT INTO evaluations (job_id, task, model_id, test_version_id, production_card, candidate, "

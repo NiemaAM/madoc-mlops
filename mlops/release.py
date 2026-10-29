@@ -119,7 +119,7 @@ def open_pull_request(task, model, evaluation, dataset_version, log=print):
     """Copy the candidate into the clone, update MODEL_CARD.json, push a branch, open the pull request -> URL."""
     settings = params()["release"]
     folder = sync()
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")   # two releases in a minute: two branches
     branch = f"models/{task}-{stamp}"
     git("checkout", "-b", branch)
     shutil.copyfile(model["path"], folder / settings["models"][task])
