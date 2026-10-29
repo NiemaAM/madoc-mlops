@@ -2,10 +2,19 @@
 """A stand-in for ketos in the tests: writes what the real one writes, instantly."""
 import os, pathlib, sys
 a = sys.argv[1:]
-while a and a[0] in ("-d", "-s"):
+while a and a[0] in ("-d", "-s", "--workers", "--precision"):
     a = a[2:]
 cmd = a[0]
+if cmd == "compile":   # a binary dataset of the lines of the pages listed in -F
+    pages = pathlib.Path(a[a.index("-F") + 1]).read_text().split()
+    pathlib.Path(a[a.index("-o") + 1]).write_text("arrow of " + str(len(pages)) + " pages")
+    sys.exit(0)
 if cmd in ("train", "segtrain"):
+    if "--format-type" in a and a[a.index("--format-type") + 1] == "binary":   # the manifests must name compiled datasets
+        for flag in ("--training-data", "--evaluation-data"):
+            listed = pathlib.Path(a[a.index(flag) + 1]).read_text().split()
+            if not listed or not all(p.endswith(".arrow") and pathlib.Path(p).is_file() for p in listed):
+                sys.exit(f"ketos: {flag} does not name a compiled dataset")
     out = pathlib.Path(a[a.index("--output") + 1]); out.mkdir(parents=True, exist_ok=True)
     writer = None
     if os.environ.get("MLOPS_TB_DIR"):   # the metrics for TensorBoard, as mlops/ketos_logged.py makes kraken write them

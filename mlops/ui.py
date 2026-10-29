@@ -62,7 +62,9 @@ LABELS = {"start_from": "Start from", "epochs": "Epochs", "quit": "Stop", "lag":
           "batch_size": "Batch size", "resize": "Resize (alphabet)", "learning_rate": "Learning rate",
           "schedule": "Learning-rate schedule", "cos_max": "Cosine epochs",
           "kraken_augment": "kraken's line augmentation (--augment)",
-          "use_augmented": "Add the augmented train pages (Data tab)", "extra_args": "Other ketos options"}
+          "use_augmented": "Add the augmented train pages (Data tab)", "workers": "Data loading workers",
+          "precision": "Precision", "compile": "Compile the lines once (faster epochs)",
+          "extra_args": "Other ketos options"}
 
 
 def training_values(task):

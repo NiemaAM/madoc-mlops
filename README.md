@@ -235,7 +235,10 @@ Pause and resume by hand: `docker compose exec mlops-ui python -m mlops.cli paus
 
 **Train** shows the options of each task: the model to start from (any `.mlmodel` of MaDoc's repository, its
 production model by default), epochs, stop rule, lag, minimum epochs, batch size (HTR), resize, learning rate and
-schedule, kraken's line augmentation, the augmented train pages, and any other ketos option. They start from
+schedule, kraken's line augmentation, the augmented train pages, the data loading workers and the precision
+(options of ketos itself, written before its command), compiling the lines once (HTR: `ketos compile`, the
+`.arrow` file is kept in `data/compiled/` and reused while the pages do not change), and any other ketos option.
+They start from
 `params.yaml` (`blla:` / `htr:`); what you change is saved in the database when you press Train and used for the
 next trainings; **Reset** comes back to `params.yaml`. Every job keeps the exact options it ran with (in its
 log, its job arguments and its W&B config).
@@ -346,7 +349,8 @@ in `.env`, then `docker compose up -d`.
 |---|---|
 | `ingest` | the checks of a page, the group pattern of the split, the split fractions, the upload size limit |
 | `augment` | augmentation on or off, copies per page, seed |
-| `blla`, `htr` | the ketos options (epochs, batch size, lag, resize, extra arguments) |
+| `blla`, `htr` | the ketos options (epochs, batch size, lag, resize, workers, precision, compile, extra arguments) |
+| `jobs` | how long the log lines of a finished job are kept (`log_retention_days`) |
 | `gate` | the metric per page, the minimum gain, the tolerance on the old test pages, the bootstrap |
 | `wandb` | entity, projects, model collections |
 | `release` | MaDoc's repository, branch, model paths, model card |

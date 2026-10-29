@@ -56,6 +56,9 @@ ingest:
     missing_character: 2000
     page_types: {"1": 2000, "2": 3000}
 
+jobs:
+  log_retention_days: 180      # the log lines of a job are deleted this long after it finished (0: kept)
+
 ui:
   rare_characters: 50          # Data tab, vocabulary: a character seen fewer times is shown in red
 
@@ -79,13 +82,16 @@ blla:
   cos_max: 30
   kraken_augment: false        # ketos --augment
   use_augmented: false         # add the augmented train pages (Data tab)
+  workers: 4                   # ketos --workers: processes preparing the batches while the GPU trains
+  precision: 32-true           # ketos --precision; bf16-mixed is faster on the RTX 50 series (check the accuracy)
   extra_args: ""               # any other ketos segtrain option
 
 htr:
   start_from: models/htr.mlmodel
   epochs: -1
   quit: early
-  lag: 20
+  # jobs 16 and 17 had their best epoch at 7 and ran 10 to 15 more epochs without a better one: 10 is enough here
+  lag: 10
   min_epochs: null
   batch_size: 30
   resize: new                  # union: keep the model's alphabet and add the new characters; new: exactly the data's
@@ -94,6 +100,9 @@ htr:
   cos_max: null
   kraken_augment: false
   use_augmented: true
+  workers: 4
+  precision: 32-true
+  compile: true                # the lines cut out of the pages once (ketos compile, reused), not at every epoch
   extra_args: ""
 
 # a candidate is better when it wins on the SAME test pages (old + new), with a confidence interval computed by

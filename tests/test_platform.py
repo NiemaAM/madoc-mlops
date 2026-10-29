@@ -288,6 +288,28 @@ def test_page_types_are_balanced_and_never_split_apart(env):
             assert all(set(result["page_types"][s]) == {"1", "2"} for s in ("train", "val", "test"))
 
 
+def test_augmentation_reuses_the_pages_already_augmented(env):
+    """A new dataset version (new pages ingested): the train pages augmented for the previous version are linked,
+    only the new ones go through the augmentation script, and the files are the same."""
+    from mlops import augment, db
+    with db.connection() as conn:
+        ingest_zip(conn, env, "a", [(f"R{r}_2016_{a}-2-1", (r * 40, a * 30, 90)) for r in range(7) for a in range(2)])
+        logs = []
+        first = augment.run_augment(conn, {"args": {"copies": 1, "seed": 3}}, logs.append, lambda: False, None)
+        old_files = {p.name: p.read_bytes() for p in augment.augmentations()[0]["folder"].glob("*_aug*")}
+        assert len(old_files) == 2 * first["pages"]                            # image + PageXML of every copy
+        assert any(f"0 train pages already augmented (reused), {first['pages']} to augment" in line for line in logs)
+        conn.execute("UPDATE pages SET split = 'train'")                       # a new version, more train pages
+        logs.clear()
+        second = augment.run_augment(conn, {"args": {"copies": 1, "seed": 3}}, logs.append, lambda: False, None)
+        new = second["pages"] - first["pages"]
+        assert new > 0 and any(f"{first['pages']} train pages already augmented (reused), {new} to augment" in line
+                               for line in logs)
+        folder = augment.augmentations()[0]["folder"]
+        assert len(augment.augmentations()) == 1                                # the older version's folder is gone
+        assert all((folder / name).read_bytes() == data for name, data in old_files.items())
+
+
 def test_augment_job_and_browse(env):
     from mlops import augment, browse, db
     with db.connection() as conn:
@@ -429,6 +451,21 @@ def test_a_command_printing_bytes_that_are_not_utf8(tmp_path):
     assert out.startswith("ok ") and out.rstrip().endswith("end")
 
 
+def test_old_job_logs_are_pruned(env):
+    from mlops import db, jobs
+    with db.connection() as conn:
+        old, recent, running = (jobs.enqueue(conn, "augment") for _ in range(3))
+        for job in (old, recent, running):
+            jobs.Log(conn, job["id"], flush_every=0)("a line")
+        conn.execute("UPDATE jobs SET status = 'done', finished_at = now() - interval '200 days' WHERE id = %s",
+                     (old["id"],))
+        conn.execute("UPDATE jobs SET status = 'done', finished_at = now() WHERE id = %s", (recent["id"],))
+        assert jobs.prune_logs(conn, 0) == 0
+        assert jobs.prune_logs(conn, 180) == 1
+        left = {r["job_id"] for r in db.all_rows(conn, "SELECT job_id FROM job_logs")}
+        assert left == {recent["id"], running["id"]}
+
+
 def test_cancel_stops_the_process(env):
     from mlops.process import Cancelled, run
     stop = threading.Event()
@@ -464,6 +501,11 @@ def test_whole_flow_with_the_worker(env, madoc_remote, monkeypatch):
         assert not upload.exists()                                                         # ingested, removed
         models = db.all_rows(conn, "SELECT * FROM models ORDER BY id")
         assert [m["task"] for m in models] == ["htr", "blla"] and all(Path(m["path"]).is_file() for m in models)
+        # HTR trains on compiled lines (ketos compile, then --format-type binary); the segmentation on the pages
+        logs = [r["line"] for r in db.all_rows(conn, "SELECT line FROM job_logs ORDER BY id")]
+        assert sum("compile -f page" in line for line in logs) == 2                      # train and val
+        assert any(" train " in line and "--format-type binary" in line for line in logs)
+        assert any(" segtrain " in line and "--format-type xml" in line and "--workers 4" in line for line in logs)
         # the metrics came live from the TensorBoard files of ketos (not only from its final progress bar)
         assert models[1]["val_metrics"]["val_bl_f1"] == pytest.approx(0.83) and "epoch" in models[1]["val_metrics"]
         for model in models:
@@ -515,6 +557,10 @@ def test_training_options_and_split_settings(env):
         assert settings.training(conn, "htr")["learning_rate"] == 1e-4           # saved from the app
         cmd = ketos_command("htr", settings.training(conn, "htr"), "/m.mlmodel", "t.txt", "v.txt", "out")
         text = " ".join(cmd)
+        assert cmd.index("--workers") < cmd.index("train") and cmd.index("--precision") < cmd.index("train")
+        assert "--format-type page" in " ".join(cmd)
+        assert "--format-type binary" in " ".join(
+            ketos_command("htr", settings.training(conn, "htr"), "/m.mlmodel", "t", "v", "o", binary=True))
         for part in ("train --load /m.mlmodel", "--epochs 40", "--quit early", "--lag 7", "--lrate 0.0001",
                      "--schedule cosine", "--cos-max 40", "--batch-size 30", "--augment", "--warmup 200",
                      "--resize new"):
@@ -582,6 +628,26 @@ def test_a_paused_worker_takes_no_job(env):
         conn.execute("UPDATE jobs SET status = 'queued' WHERE id = %s", (job["id"],))
         settings.resume(conn)
         assert not settings.paused(conn)
+
+
+def test_the_lines_are_compiled_once(env):
+    """ketos compile is run once for the same files, and again when one of them changes."""
+    from mlops.train import compiled_dataset
+    pages = []
+    for n in range(3):
+        make_page(env / "src", f"p{n}", (n * 50, 0, 0))
+        pages.append(str(env / "src" / f"p{n}.xml"))
+    logs = []
+    first = compiled_dataset(pages, "train", {"workers": 2}, logs.append, lambda: False)
+    assert first.suffix == ".arrow" and first.read_text() == "arrow of 3 pages"
+    assert any("compile -f page" in line and "--workers 2" in line for line in logs)
+    logs.clear()
+    assert compiled_dataset(pages, "train", {"workers": 2}, logs.append, lambda: False) == first
+    assert logs == [f"compiled train lines reused ({first.name})"]
+    import os
+    os.utime(pages[0], ns=(1, 1))                                       # a page changed (normalized)
+    second = compiled_dataset(pages, "train", {}, logs.append, lambda: False)
+    assert second != first and second.is_file() and not first.exists()  # the old one is deleted
 
 
 def test_the_commands_of_the_deployment(env, capsys):

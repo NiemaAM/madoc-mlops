@@ -6,9 +6,11 @@ checkpoint is exported to .mlmodel and registered in W&B as a new version of the
 "candidate"), and in the database (models).
 """
 
+import hashlib
 import shlex
 import shutil
 import sys
+from pathlib import Path
 from importlib.metadata import PackageNotFoundError, version as package_version
 
 from mlops import datasets, db, release, settings as app_settings
@@ -30,12 +32,24 @@ def ketos_program():
         return ["ketos"]
 
 
-def ketos_command(task, settings, base, train_list, val_list, out):
-    """The ketos command of a training, from its options (mlops/settings.py: TRAIN_FIELDS)."""
+def ketos_globals(settings):
+    """The options of ketos itself, written before its command ("ketos -d cuda:0 --workers 4 train ..."): they
+    cannot go in extra_args, which come after the command."""
+    cmd = ["-d", params()["device"], "-s", params()["seed"]]
+    if settings.get("workers") is not None:
+        cmd += ["--workers", settings["workers"]]
+    if settings.get("precision"):
+        cmd += ["--precision", settings["precision"]]
+    return cmd
+
+
+def ketos_command(task, settings, base, train_list, val_list, out, binary=False):
+    """The ketos command of a training, from its options (mlops/settings.py: TRAIN_FIELDS). binary: the lists
+    name compiled datasets (ketos compile) instead of PageXML files."""
     o = settings
-    cmd = [*ketos_program(), "-d", params()["device"], "-s", params()["seed"],
+    cmd = [*ketos_program(), *ketos_globals(o),
            "train" if task == "htr" else "segtrain", "--load", base, "--output", out,
-           "--format-type", "page" if task == "htr" else "xml",
+           "--format-type", "binary" if binary else "page" if task == "htr" else "xml",
            "--training-data", train_list, "--evaluation-data", val_list,
            "--resize", o.get("resize") or "union", "--epochs", -1 if o.get("epochs") is None else o["epochs"],
            # early: stop when the validation has not improved for `lag` epochs (segtrain's default is "fixed": with
@@ -53,6 +67,32 @@ def ketos_command(task, settings, base, train_list, val_list, out):
     extra = o.get("extra_args") or []
     cmd += shlex.split(extra) if isinstance(extra, str) else list(extra)
     return [str(c) for c in cmd]
+
+
+def compiled_dataset(paths, name, settings, log, should_stop):
+    """The PageXML pages -> one binary dataset of their lines (ketos compile), kept in <data>/compiled/ and reused
+    while the same files are trained on. Without it, ketos cuts every line out of its page image again at every
+    epoch. -> the .arrow file."""
+    stamp = hashlib.sha256()
+    for file in sorted(paths):
+        info = Path(file).stat()
+        stamp.update(f"{file}:{info.st_size}:{info.st_mtime_ns}\n".encode())
+    folder = path("data") / "compiled"
+    target = folder / f"{name}-{stamp.hexdigest()[:16]}.arrow"
+    if target.is_file():
+        log(f"compiled {name} lines reused ({target.name})")
+        return target
+    folder.mkdir(parents=True, exist_ok=True)
+    manifest = datasets.write_list(paths, folder / f"{target.stem}.txt")
+    partial = target.with_suffix(".part")
+    globals_ = ["-d", params()["device"]] + (["--workers", settings["workers"]] if settings.get("workers") else [])
+    run([*ketos_program(), *globals_, "compile", "-f", "page", "-o", partial, "-F", manifest], log, should_stop)
+    partial.rename(target)
+    manifest.unlink(missing_ok=True)
+    for old in folder.glob(f"{name}-*.arrow"):   # the compilations of older datasets (disk)
+        if old != target:
+            old.unlink(missing_ok=True)
+    return target
 
 
 def base_model(task, start_from):
@@ -106,8 +146,13 @@ def train(conn, job, log, should_stop, set_wandb_url):
     use_augmented = args.get("use_augmented", settings.get("use_augmented")) and params()["augment"]["enabled"]
     augmented = augmented_paths(version, train_rows, log, should_stop) if use_augmented else []
     train_paths += augmented
+    val_paths = datasets.xml_paths(val_rows)
+    binary = task == "htr" and bool(settings.get("compile"))
+    if binary:   # the manifests then name the compiled datasets
+        train_paths = [str(compiled_dataset(train_paths, "train", settings, log, should_stop))]
+        val_paths = [str(compiled_dataset(val_paths, "val", settings, log, should_stop))]
     train_list = datasets.write_list(train_paths, out / "train.txt")
-    val_list = datasets.write_list(datasets.xml_paths(val_rows), out / "val.txt")
+    val_list = datasets.write_list(val_paths, out / "val.txt")
     app_settings.publish_models(conn, release.sync())
     base = base_model(task, settings.get("start_from"))
     log(f'starting from {base["relative"]}' + (" (production)" if base["production"] else ""))
@@ -116,7 +161,7 @@ def train(conn, job, log, should_stop, set_wandb_url):
         project=wandb_settings["project"][task], entity=wandb_settings["entity"], job_type="train",
         name=f'{task}-job{job["id"]}',
         config={"task": task, "job": job["id"], "dataset_version": version["digest"], "pages": version["counts"],
-                "train_files": len(train_paths), "augmented_pages": len(augmented), "base_model": base["card"].get("artifact") or base["relative"],
+                "train_files": len(train_rows) + len(augmented), "augmented_pages": len(augmented), "base_model": base["card"].get("artifact") or base["relative"],
                 "settings": settings, "augment": params()["augment"], "kraken": kraken_version(), "gpu": gpu_name(),
                 "leaking_groups": len(leaking)})
     set_wandb_url(run_.url)
@@ -143,7 +188,7 @@ def train(conn, job, log, should_stop, set_wandb_url):
     try:
         try:
             # COLUMNS: the progress bar printed on one line (80 columns cut "val_bl_f1: 0.973" over two lines)
-            run(ketos_command(task, settings, base["path"], train_list, val_list, out / "checkpoints"), log,
+            run(ketos_command(task, settings, base["path"], train_list, val_list, out / "checkpoints", binary), log,
                 should_stop, on_line, env={"COLUMNS": "400", "MLOPS_TB_DIR": str(log_dir)})
         finally:
             bridge.stop()

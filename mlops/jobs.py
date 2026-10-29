@@ -51,6 +51,16 @@ def recover(conn):
                  "finished_at = now() WHERE status = 'running'")
 
 
+def prune_logs(conn, days):
+    """The log lines of the jobs finished more than `days` days ago are deleted (the job, its result, its error
+    and its W&B run are kept): every line ketos prints is stored, the table would only grow. -> lines deleted."""
+    if not days:
+        return 0
+    cursor = conn.execute("DELETE FROM job_logs l USING jobs j WHERE l.job_id = j.id AND j.finished_at IS NOT NULL "
+                          "AND j.finished_at < now() - make_interval(days => %s)", (int(days),))
+    return cursor.rowcount
+
+
 class Log:
     """The output of a job, written to job_logs in small batches (the app reads it live)."""
 

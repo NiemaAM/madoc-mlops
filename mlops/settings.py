@@ -25,10 +25,14 @@ TRAIN_FIELDS = {
     "cos_max": (int, "cosine schedule: epochs over which the learning rate decreases"),
     "kraken_augment": (bool, "kraken's own augmentation of the lines while training (ketos --augment)"),
     "use_augmented": (bool, "add the augmented train pages of the dataset version (Data tab)"),
+    "workers": (int, "processes preparing the batches while the GPU trains (ketos --workers; 0: none)"),
+    "precision": (str, "32-true: kraken's default; bf16-mixed: faster on the RTX 50 series, check the accuracy"),
+    "compile": (bool, "HTR: the lines cut out of the pages once into a binary file (ketos compile), not every epoch"),
     "extra_args": (str, "any other ketos option, as on the command line"),
 }
-TASK_FIELDS = {"htr": list(TRAIN_FIELDS), "blla": [k for k in TRAIN_FIELDS if k != "batch_size"]}
-CHOICES = {"quit": ["early", "fixed"], "resize": ["union", "new"],
+HTR_ONLY = ("batch_size", "compile")
+TASK_FIELDS = {"htr": list(TRAIN_FIELDS), "blla": [k for k in TRAIN_FIELDS if k not in HTR_ONLY]}
+CHOICES = {"quit": ["early", "fixed"], "resize": ["union", "new"], "precision": ["32-true", "bf16-mixed", "16-mixed"],
            "schedule": ["constant", "cosine", "exponential", "step", "reduceonplateau", "1cycle"]}
 SPLIT_KEYS = ("val_fraction", "test_fraction", "split_tolerance", "split_weights")
 
@@ -56,13 +60,14 @@ def default_training(task):
            "batch_size": p.get("batch_size"), "resize": p.get("resize", "union"),
            "learning_rate": p.get("learning_rate"), "schedule": p.get("schedule", "constant"),
            "cos_max": p.get("cos_max"), "kraken_augment": bool(p.get("kraken_augment", False)),
-           "use_augmented": bool(p.get("use_augmented", False)),
+           "use_augmented": bool(p.get("use_augmented", False)), "workers": p.get("workers", 4),
+           "precision": p.get("precision") or "32-true", "compile": bool(p.get("compile", True)),
            "extra_args": extra if isinstance(extra, str) else shlex.join(str(a) for a in extra)}
     return {k: v for k, v in out.items() if k in TASK_FIELDS[task]}
 
 
 # the smallest value of the numeric options (None: kraken's default); epochs -1 is "until early stopping"
-MINIMUM = {"epochs": -1, "lag": 1, "min_epochs": 0, "batch_size": 1, "cos_max": 1}
+MINIMUM = {"epochs": -1, "lag": 1, "min_epochs": 0, "batch_size": 1, "cos_max": 1, "workers": 0}
 
 
 def typed(key, value):

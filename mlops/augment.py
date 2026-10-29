@@ -9,6 +9,7 @@ its version. The pages are kept in <data>/augmented/<version>-c<copies>-s<seed>/
 that version; the augmentations of older versions are deleted (disk).
 """
 
+import os
 import shutil
 import sys
 
@@ -39,6 +40,31 @@ def latest(version):
     return next((a for a in augmentations() if a["digest"] == version["digest"]), None)
 
 
+def reuse(row, copies, seed, target):
+    """Link the augmented copies of this page from a finished augmentation with the same copies and seed into
+    `target` -> True when all of them were found."""
+    for other in augmentations():
+        if other["folder"] == target or other["copies"] != str(copies) or other["seed"] != str(seed):
+            continue
+        files = []
+        for k in range(1, copies + 1):
+            stem = f'{row["id"]}_aug{k}'
+            xml = other["folder"] / f"{stem}.xml"
+            images = [f for f in other["folder"].glob(f"{stem}.*") if f.suffix != ".xml"]
+            if not xml.is_file() or not images:
+                break
+            files += [xml, images[0]]
+        else:
+            for file in files:
+                destination = target / file.name
+                try:
+                    os.link(file, destination)       # no copy: the same file in both folders
+                except OSError:
+                    shutil.copyfile(file, destination)
+            return True
+    return False
+
+
 def augment(version, train_rows, log, should_stop=lambda: False, copies=None, seed=None):
     """-> the XML paths of the augmented pages of the version (made if needed)."""
     from mlops.process import run
@@ -49,20 +75,25 @@ def augment(version, train_rows, log, should_stop=lambda: False, copies=None, se
     target = path("data") / "augmented" / folder_name(version, copies, seed)
     done = target / ".done"
     if not done.is_file():
-        log(f"augmenting {len(train_rows)} train pages of version {version['digest']} ({copies} copies, seed {seed})")
-        source = path("data") / "work" / f'augment-{version["digest"]}'
-        shutil.rmtree(source, ignore_errors=True)
-        source.mkdir(parents=True)
-        pages = path("data") / "pages"
-        for row in train_rows:   # a folder with only the train pages: links, not copies
-            for name in (row["image_name"], f'{row["id"]}.xml'):
-                (source / name).symlink_to(pages / name)
         shutil.rmtree(target, ignore_errors=True)
         target.mkdir(parents=True)
-        run([sys.executable, ROOT / "script" / "data_augmentation_xml.py", "--input", source, "--output", target,
-             "--copies", copies, "--seed", seed], log, should_stop)
+        # a page already augmented for another version (same copies, same seed) is the same: the seed of a copy
+        # depends on the page, the copy and the seed only. Its files are linked, only the new pages are augmented.
+        missing = [row for row in train_rows if not reuse(row, copies, seed, target)]
+        log(f"version {version['digest']}: {len(train_rows) - len(missing)} train pages already augmented "
+            f"(reused), {len(missing)} to augment ({copies} copies, seed {seed})")
+        if missing:
+            source = path("data") / "work" / f'augment-{version["digest"]}'
+            shutil.rmtree(source, ignore_errors=True)
+            source.mkdir(parents=True)
+            pages = path("data") / "pages"
+            for row in missing:   # a folder with only these pages: links, not copies
+                for name in (row["image_name"], f'{row["id"]}.xml'):
+                    (source / name).symlink_to(pages / name)
+            run([sys.executable, ROOT / "script" / "data_augmentation_xml.py", "--input", source, "--output",
+                 target, "--copies", copies, "--seed", seed], log, should_stop)
+            shutil.rmtree(source, ignore_errors=True)
         done.write_text("ok\n")
-        shutil.rmtree(source, ignore_errors=True)
         for old in (path("data") / "augmented").iterdir():   # the augmentations of older versions
             if old.is_dir() and not old.name.startswith(version["digest"]):
                 shutil.rmtree(old)

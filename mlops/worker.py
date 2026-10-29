@@ -17,7 +17,7 @@ from pathlib import Path
 
 from mlops import db, jobs, release
 from mlops.augment import run_augment
-from mlops.config import path
+from mlops.config import params, path
 from mlops.evaluate import evaluate
 from mlops.ingest import ingest
 from mlops.process import Cancelled
@@ -107,6 +107,9 @@ def main(once=False):
     threading.Thread(target=heartbeat_loop, args=(state, stop), daemon=True).start()
     with db.connection() as conn:
         jobs.recover(conn)
+        pruned = jobs.prune_logs(conn, params().get("jobs", {}).get("log_retention_days"))
+        if pruned:
+            print(f"{pruned} log lines of old jobs deleted (jobs.log_retention_days)", flush=True)
         try:
             from mlops.settings import publish_models
             publish_models(conn, release.sync())
