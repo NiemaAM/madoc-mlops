@@ -16,6 +16,10 @@ wandb:
   artifact: {blla: kraken-blla-bc, htr: kraken-htr-bc}     # one collection per task: v0, v1 ...
 
 ingest:
+  # the unit of the split: "writer" (the officer named on page 2 of each act, "من طرفنا نحن ... موظف جماعي": no
+  # writer of the test pages is in train, the test is writer-independent; pages whose act has no page 2 yet are
+  # trained on, never tested) or "group" (register and year, group_pattern below). Changed in the Data tab too.
+  split_by: writer
   min_lines: 5                 # a page with fewer text lines is rejected
   min_text_ratio: 0.9          # share of the lines that must be transcribed
   max_upload_mb: 2048          # a larger zip is refused
@@ -104,6 +108,14 @@ htr:
   precision: 32-true
   compile: true                # the lines cut out of the pages once (ketos compile, reused), not at every epoch
   extra_args: ""
+
+# the cross-validation by writer (Experiments tab): a writer with fewer pages joins the others of its size in one
+# fold; with more writers than max_folds, the writers are grouped into that many folds of about the same size. The
+# validation pages of a fold are whole acts of its training writers (val_fraction of the pages).
+crossval:
+  min_writer_pages: 5
+  max_folds: 10
+  val_fraction: 0.15
 
 # a candidate is better when it wins on the SAME test pages (old + new), with a confidence interval computed by
 # resampling the pages (bootstrap): a gain that could be noise does not pass.

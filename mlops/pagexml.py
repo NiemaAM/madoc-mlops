@@ -24,8 +24,8 @@ def points(text):
 
 
 def read_page(path):
-    """-> {"image": imageFilename, "width", "height", "lines": [{"baseline": bool, "coords": bool, "text": str,
-    "baseline_points": [(x, y)], "polygon": [(x, y)]}]}.
+    """-> {"image": imageFilename, "width", "height", "lines": [{"id": str, "baseline": bool, "coords": bool,
+    "text": str, "baseline_points": [(x, y)], "polygon": [(x, y)]}]}.
     ValueError when the file is not a PageXML."""
     try:
         root = ET.parse(path).getroot()
@@ -44,6 +44,7 @@ def read_page(path):
             unicode = next((el for el in equiv if local(el.tag) == "Unicode"), None)
             text = (unicode.text or "").strip() if unicode is not None else ""
         lines.append({
+            "id": line.get("id", ""),
             "baseline": "Baseline" in children and bool(children["Baseline"].get("points", "").strip()),
             "coords": "Coords" in children and bool(children["Coords"].get("points", "").strip()),
             "text": text,

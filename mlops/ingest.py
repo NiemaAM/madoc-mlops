@@ -8,11 +8,14 @@ Pseudonymisation: a kept page is renamed to an opaque id (the start of the SHA-2
 file name, which identifies a real record, is kept only in the private table page_origins. The images and the
 transcriptions still show names and dates: the data stays personal data, kept on this machine only.
 
-Split by group (params.yaml: ingest.group_pattern): the pages of the same register and year land in the same
-split, so a test page is never a near-copy of a train page. The new groups are placed to balance the CHARACTERS
-(mlops/splitting.py): 70 / 15 / 15 of the characters, every character in train, val and test, the same character
-distribution in every split. A group already in the dataset keeps its split. The group is stored as a keyed hash
-(MLOPS_SECRET), never as its name.
+Split by writer (params.yaml: ingest.split_by, default): the officer named on page 2 of each act (mlops/writers.py)
+is the unit placed, so no writer of the test pages is in train or val; page 1 takes the writer of page 2 of its
+act, pages whose act has no page 2 yet stay in train. Or by group (split_by: group, or fewer than 3 writers found;
+ingest.group_pattern): the pages of the same register and year land in the same split. The new writers / groups are
+placed to balance the CHARACTERS (mlops/splitting.py): 70 / 15 / 15 of the characters, every character in train,
+val and test, the same character distribution in every split. A writer / group already in the dataset keeps its
+split. A held-out batch stays in test for good. Groups, acts and writers are stored as keyed hashes (MLOPS_SECRET),
+never as their names (the officer's name is in the private table page_writers).
 
 Page types (ingest.page_type_pattern): "..._<act>-1-1" is page 1 of an act (the names, in Arabic and French),
 "..._<act>-2-1" its page 2 (the other details). Both pages of an act are in the same group, so in the same split (no leak of the
@@ -20,8 +23,6 @@ names between train and test); the split also balances the two types.
 """
 
 import hashlib
-import hmac
-import os
 import re
 import shutil
 import tempfile
@@ -32,7 +33,7 @@ from pathlib import Path
 from PIL import Image
 
 from mlops import db, normalize, settings as app_settings
-from mlops.config import SPLITS, params, path
+from mlops.config import SPLITS, keyed, params, path
 from mlops.pagexml import read_page, set_image_name
 from mlops.splitting import assign_groups, coverage, describe
 from mlops.vocabulary import page_characters
@@ -40,15 +41,10 @@ from mlops.vocabulary import page_characters
 IMAGE_SUFFIXES = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
 
 
-def secret():
-    return os.environ.get("MLOPS_SECRET", "").encode() or b"change-me"
-
-
 def group_of(stem, pattern):
     """The group of a page from its original file name ("..._2016_162-2-1" -> "..._2016"), keyed hash."""
     match = re.match(pattern, stem) if pattern else None
-    group = match.group(1) if match else stem
-    return hmac.new(secret(), group.encode(), hashlib.sha256).hexdigest()[:16]
+    return keyed(match.group(1) if match else stem)
 
 
 def page_type_of(stem, pattern):
@@ -128,12 +124,19 @@ def extract(zip_path, target):
 
 
 def ingest(conn, batch_id, source, force_split=None, log=print):
-    """Ingest a zip or a folder into the dataset -> report (counts only: safe to show and to log)."""
+    """Ingest a zip or a folder into the dataset -> report (counts only: safe to show and to log).
+
+    A held-out batch (batches.held_out) puts its pages in test for good: never trained on, never augmented,
+    never moved by a split. force_split (mlops.cli import --split) puts the pages in that split now (an existing
+    split imported as it is); a later "split again" may move them."""
     settings = params()["ingest"]
     pages_dir = path("data") / "pages"
     pages_dir.mkdir(parents=True, exist_ok=True)
     source = Path(source)
-    report = {"added": {s: 0 for s in SPLITS}, "duplicates": 0, "rejected": 0, "reasons": {}}
+    batch = db.one(conn, "SELECT held_out FROM batches WHERE id = %s", batch_id) or {}
+    pinned = "test" if batch.get("held_out") else None
+    report = {"added": {s: 0 for s in SPLITS}, "duplicates": 0, "restored": 0, "rejected": 0, "reasons": {},
+              "held_out": bool(batch.get("held_out"))}
     temporary = None
     try:
         if source.is_file():
@@ -142,7 +145,7 @@ def ingest(conn, batch_id, source, force_split=None, log=print):
             folder = temporary
         else:
             folder = source
-        # 1. check every page, find its group
+        # 1. check every page
         reasons, candidates, seen, normalized = Counter(), [], set(), Counter()
         replacements = normalize.table()
         xmls = sorted(folder.rglob("*.xml"))
@@ -155,57 +158,51 @@ def ingest(conn, batch_id, source, force_split=None, log=print):
             for line in page["lines"]:   # the texts as they will be stored (ingest.normalize)
                 line["text"] = normalize.text(line["text"], replacements)[0].strip()
             digest = hashlib.sha256(image.read_bytes()).hexdigest()
-            if digest in seen or db.one(conn, "SELECT 1 AS x FROM pages WHERE sha256 = %s", digest):
+            if digest in seen:
                 report["duplicates"] += 1
                 continue
             seen.add(digest)
+            existing = db.one(conn, "SELECT id, deleted_at FROM pages WHERE sha256 = %s", digest)
+            if existing and existing["deleted_at"] is None:
+                report["duplicates"] += 1
+                continue
+            if existing:   # a page of a deleted batch uploaded again: it comes back, in this batch
+                conn.execute("UPDATE pages SET deleted_at = NULL, batch_id = %s, held_out = %s, pinned_split = %s, "
+                             "split = coalesce(%s, split) WHERE id = %s",
+                             (batch_id, bool(batch.get("held_out")), pinned, pinned or force_split, existing["id"]))
+                report["restored"] += 1
+                continue
             candidates.append((xml_path, page, image, digest, group_of(xml_path.stem, settings["group_pattern"]),
                                page_type_of(xml_path.stem, settings.get("page_type_pattern"))))
             if number % 100 == 0:
                 log(f"{number}/{len(xmls)} checked")
-        # 2. the split of every group: a known group keeps its split, the new ones are placed to balance the
-        #    characters and the page types (mlops/splitting.py)
         backfill_page_types(conn)
-        votes = {}
-        fixed, fixed_types = {split: Counter() for split in SPLITS}, {split: Counter() for split in SPLITS}
-        for row in db.all_rows(conn, "SELECT id, group_key, split, page_type FROM pages"):
-            votes.setdefault(row["group_key"], Counter())[row["split"]] += 1
-            fixed[row["split"]].update(page_characters(row["id"]))
-            fixed_types[row["split"]][row["page_type"]] += 1
-        known = {group: counter.most_common(1)[0][0] for group, counter in votes.items()}
-        new_groups, new_types = {}, {}
-        for _, page, _, _, group, kind in candidates:
-            characters = Counter("".join(line["text"] for line in page["lines"]))
-            if group in known:
-                fixed[force_split or known[group]].update(characters)
-                fixed_types[force_split or known[group]][kind] += 1
-            else:
-                new_groups.setdefault(group, Counter()).update(characters)
-                new_types.setdefault(group, Counter())[kind] += 1
-        splits = dict(known)
-        if not force_split:
-            split = app_settings.split(conn)   # params.yaml, or what was chosen in the app (Data tab)
-            splits.update(assign_groups(fixed, new_groups, split["val_fraction"], split["test_fraction"],
-                                        split["split_tolerance"], fixed_types, new_types, split["split_weights"]))
-        by_split = {split: Counter(counter) for split, counter in fixed.items()}
-        types_by_split = {split: Counter(counter) for split, counter in fixed_types.items()}
-        for group, characters in new_groups.items():
-            by_split[force_split or splits[group]].update(characters)
-            types_by_split[force_split or splits[group]].update(new_types[group])
-        # 3. write the pages, in one transaction: a batch that fails half-way adds no page (the files already
+        # 2. write the pages, in one transaction: a batch that fails half-way adds no page (the files already
         #    copied are written again by the next try)
         with conn.transaction():
-            write_pages(conn, candidates, splits, force_split, batch_id, folder, pages_dir, replacements,
-                        normalized, report)
+            new_ids = write_pages(conn, candidates, pinned, pinned or force_split, batch_id, folder, pages_dir,
+                                  replacements, normalized, bool(batch.get("held_out")))
+        # 3. the split: the writers (or groups) already in the dataset keep their split, the new ones are placed
+        #    to balance the characters and the page types (mlops/splitting.py)
+        # pages imported with a split keep it (they count as already placed); the others are placed
+        placement = place(conn, new_ids=() if force_split else new_ids, log=lambda *_: None)
+        for row in db.all_rows(conn, "SELECT split, count(*) AS n FROM pages WHERE id = ANY(%s) GROUP BY split",
+                               list(new_ids)):
+            report["added"][row["split"]] = row["n"]
         report["rejected"] = sum(reasons.values())
         report["reasons"] = dict(reasons)
-        report["new_groups"] = len(new_groups)
-        report["coverage"] = coverage(by_split, types_by_split)
+        report["new_groups"] = placement["new_units"]
+        report["moved"] = placement["moved"]
+        report["coverage"] = placement["coverage"]
         report["normalized"] = dict(normalized)
         report["total"] = {row["split"]: row["n"] for row in
-                           db.all_rows(conn, "SELECT split, count(*) AS n FROM pages GROUP BY split")}
-        log(f"added {report['added']} ({len(new_groups)} new groups), {report['duplicates']} duplicates, "
-            f"{report['rejected']} rejected {report['reasons'] or ''}")
+                           db.all_rows(conn, "SELECT split, count(*) AS n FROM pages WHERE deleted_at IS NULL "
+                                             "GROUP BY split")}
+        log(f"added {report['added']} ({placement['new_units']} new {placement['unit']}s), "
+            f"{report['duplicates']} duplicates, {report['restored']} restored, {report['rejected']} rejected "
+            f"{report['reasons'] or ''}" + (" (held-out batch: in test for good)" if report["held_out"] else ""))
+        if placement["moved"]:
+            log(f"{placement['moved']} pages moved to the split of their writer (their act's page 2 came in)")
         log(describe(report["coverage"]))
         log(f"normalized: {normalize.describe(normalized)}")
         return report
@@ -214,75 +211,160 @@ def ingest(conn, batch_id, source, force_split=None, log=print):
             shutil.rmtree(temporary, ignore_errors=True)
 
 
-def write_pages(conn, candidates, splits, force_split, batch_id, folder, pages_dir, replacements, normalized, report):
-    """Copy the checked pages into the dataset (opaque names) and record them (pages, page_origins)."""
+def write_pages(conn, candidates, pinned, split, batch_id, folder, pages_dir, replacements, normalized, held_out):
+    """Copy the checked pages into the dataset (opaque names) and record them (pages, page_origins, the officer
+    named in them) -> their ids. The split is set right after, by place()."""
+    from mlops import writers
+    ids = []
     for xml_path, page, image, digest, group, kind in candidates:
         page_id = digest[:16]
-        split = force_split or splits[group]
         image_name = page_id + image.suffix.lower()
         shutil.copyfile(image, pages_dir / image_name)
         xml_text, found = normalize.xml(xml_path.read_text(encoding="utf-8"), replacements)
         normalized.update(found)
         (pages_dir / f"{page_id}.xml").write_text(set_image_name(xml_text, image_name), encoding="utf-8")
         lines = page["lines"]
+        original = str(xml_path.relative_to(folder))
         conn.execute(
-            "INSERT INTO pages (id, sha256, batch_id, group_key, split, image_name, lines, characters, page_type) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
-            (page_id, digest, batch_id, group, split, image_name, len(lines),
-             sum(len(line["text"]) for line in lines), kind))
-        conn.execute("INSERT INTO page_origins (page_id, original_name) VALUES (%s, %s)",
-                     (page_id, str(xml_path.relative_to(folder))))
-        report["added"][split] += 1
+            "INSERT INTO pages (id, sha256, batch_id, group_key, split, image_name, lines, characters, page_type, "
+            "act_key, pinned_split, held_out) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (page_id, digest, batch_id, group, split or "train", image_name, len(lines),
+             sum(len(line["text"]) for line in lines), kind, writers.act_key(original), pinned, held_out))
+        conn.execute("INSERT INTO page_origins (page_id, original_name) VALUES (%s, %s)", (page_id, original))
+        writers.record(conn, page_id, [line["text"] for line in lines])
+        ids.append(page_id)
+    return ids
 
 
-def normalize_dataset(conn, log=print):
+MIN_WRITERS = 3
+
+
+def split_by(split=None):
+    """"writer" (the officer of the act: writer-independent test) or "group" (register and year)."""
+    mode = (split or {}).get("split_by") or params()["ingest"].get("split_by") or "writer"
+    return mode if mode in ("writer", "group") else "writer"
+
+
+def place(conn, split=None, new_ids=(), fresh=False, apply=True, log=print):
+    """Put every page of the dataset in its split -> {"pages", "groups", "coverage", "text", "moved", ...}.
+
+    The unit placed is the writer (split_by "writer") or the register-year (split_by "group"): all the pages of
+    a unit go to the same split. A pinned page (held out, imported with --split) keeps its split. In "writer"
+    mode, a page whose writer is unknown (its act has no page 2 yet) is trained on, never tested.
+    fresh: every unit placed again (resplit); otherwise the units already in the dataset keep their split and
+    only the new ones (pages of new_ids only) are placed. apply=False computes without changing anything."""
+    from mlops import writers
+    split = split or app_settings.split(conn)
+    mode = split_by(split)
+    backfill_page_types(conn)
+    if mode == "writer":
+        writers.sync(conn)
+    rows = db.all_rows(conn, "SELECT id, group_key, writer_key, split, pinned_split, page_type FROM pages "
+                             "WHERE deleted_at IS NULL ORDER BY id")
+    new_ids = set(new_ids)
+    fallback = ""
+    if mode == "writer" and len({r["writer_key"] for r in rows if r["writer_key"]}) < MIN_WRITERS:
+        # no officer line in the transcriptions (another kind of document, or too few writers to split): by
+        # register-year rather than everything in train
+        fallback = (f"fewer than {MIN_WRITERS} writers found in the transcriptions: split by register-year "
+                    "instead; ")
+        mode = "group"
+
+    def unit(row):
+        return row["writer_key"] if mode == "writer" else row["group_key"]
+
+    fixed, fixed_types = {s: Counter() for s in SPLITS}, {s: Counter() for s in SPLITS}
+    free, free_types, votes, forced = {}, {}, {}, {}
+    for row in rows:
+        characters = page_characters(row["id"])
+        if row["pinned_split"] or (mode == "writer" and not row["writer_key"]):
+            target = row["pinned_split"] or "train"
+            forced[row["id"]] = target
+            fixed[target].update(characters)
+            fixed_types[target][row["page_type"]] += 1
+            continue
+        if not fresh and row["id"] not in new_ids:
+            votes.setdefault(unit(row), Counter())[row["split"]] += 1
+        free.setdefault(unit(row), Counter()).update(characters)
+        free_types.setdefault(unit(row), Counter())[row["page_type"]] += 1
+    known = {u: counter.most_common(1)[0][0] for u, counter in votes.items()}
+    for u, target in known.items():   # a unit already placed: its pages count as fixed
+        fixed[target].update(free.pop(u))
+        fixed_types[target].update(free_types.pop(u))
+    placed = dict(known)
+    placed.update(assign_groups(fixed, free, split["val_fraction"], split["test_fraction"], split["split_tolerance"],
+                                fixed_types, free_types, split["split_weights"]))
+    target_of = {row["id"]: forced.get(row["id"]) or placed[unit(row)] for row in rows}
+    moved = sum(1 for row in rows if row["id"] not in new_ids and target_of[row["id"]] != row["split"])
+    if apply:
+        with conn.transaction():
+            for row in rows:
+                if target_of[row["id"]] != row["split"]:
+                    conn.execute("UPDATE pages SET split = %s WHERE id = %s", (target_of[row["id"]], row["id"]))
+    by_split, types_by_split = {s: Counter() for s in SPLITS}, {s: Counter() for s in SPLITS}
+    for row in rows:
+        by_split[target_of[row["id"]]].update(page_characters(row["id"]))
+        types_by_split[target_of[row["id"]]][row["page_type"]] += 1
+    pages = Counter(target_of.values())
+    units = {s: len({unit(r) for r in rows if r["id"] not in forced and target_of[r["id"]] == s}) for s in SPLITS}
+    report = coverage(by_split, types_by_split)
+    unit_name = "writer" if mode == "writer" else "group"
+    held_writers = {r["writer_key"] for r in rows if r["pinned_split"] == "test" and r["writer_key"]}
+    overlap = sum(1 for r in rows if r["writer_key"] in held_writers and target_of[r["id"]] != "test")
+    text = (fallback + f"{len(set(placed))} {unit_name}s {'placed again' if fresh else 'placed'}"
+            f"{'' if apply else ' (preview, not applied)'}: "
+            + ", ".join(f"{s} {pages[s]} pages ({units[s]} {unit_name}s)" for s in SPLITS)
+            + (f"; {sum(1 for r in rows if r['id'] in forced and not r['pinned_split'])} pages without a known "
+               "writer kept in train" if mode == "writer" else "")
+            + (f"; {sum(1 for r in rows if r['pinned_split'])} pinned pages (held out or imported with a split)"
+               if any(r["pinned_split"] for r in rows) else "")
+            + (f"; WARNING: {overlap} train/val pages share a writer with the held-out set" if overlap else "")
+            + "\n" + describe(report))
+    log(text)
+    return {"pages": dict(pages), "groups": units, "coverage": report, "text": text, "by_split": by_split,
+            "types": types_by_split, "moved": moved, "new_units": len(set(placed) - set(known)),
+            "unit": unit_name, "held_out_overlap": overlap}
+
+
+def normalize_dataset(conn, log=print, apply=True):
     """Apply ingest.normalize to the pages already in the dataset (their XML, their character count). The
-    augmented pages were made from the old texts: they are deleted (a training makes them again).
-    -> Counter of what was replaced."""
+    augmented pages were made from the old texts: they are deleted (a training makes them again). Before
+    changing anything, the XML files changed are copied to <data>/backup/normalize-<time>/.
+    apply=False: only counts what would change (the preview of the app).
+    -> {"replaced": Counter {"U+00A0": n}, "pages": pages changed, "backup": folder or None}."""
+    from datetime import datetime, timezone
     replacements = normalize.table()
-    total, changed = Counter(), 0
-    for row in db.all_rows(conn, "SELECT id FROM pages ORDER BY id"):
+    total, changed = Counter(), []
+    for row in db.all_rows(conn, "SELECT id FROM pages WHERE deleted_at IS NULL ORDER BY id"):
         xml_path = path("data") / "pages" / f'{row["id"]}.xml'
-        found = normalize.file(xml_path, replacements)
+        try:
+            _, found = normalize.xml(xml_path.read_text(encoding="utf-8"), replacements)
+        except OSError:
+            continue
         if found:
-            changed += 1
+            changed.append(row["id"])
             total.update(found)
+    backup = None
+    if apply and changed:
+        backup = path("data") / "backup" / f'normalize-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}'
+        backup.mkdir(parents=True, exist_ok=True)
+        for page_id in changed:
+            xml_path = path("data") / "pages" / f"{page_id}.xml"
+            shutil.copyfile(xml_path, backup / xml_path.name)
+            normalize.file(xml_path, replacements)
             characters = sum(len(line["text"]) for line in read_page(xml_path)["lines"])
-            conn.execute("UPDATE pages SET characters = %s WHERE id = %s", (characters, row["id"]))
-    if changed:
+            conn.execute("UPDATE pages SET characters = %s WHERE id = %s", (characters, page_id))
         shutil.rmtree(path("data") / "augmented", ignore_errors=True)
-    log(f"{changed} pages changed: {normalize.describe(total)}"
-        + (" (augmented pages deleted: they are made again from the new texts)" if changed else ""))
-    return total
+        shutil.rmtree(path("data") / "compiled", ignore_errors=True)
+    log(f"{len(changed)} pages {'changed' if apply else 'would change'}: {normalize.describe(total)}"
+        + (f" (backup of the old files: {backup.name}; augmented pages deleted: they are made again from the new "
+           "texts)" if backup else ""))
+    return {"replaced": dict(total), "pages": len(changed), "backup": str(backup) if backup else None}
 
 
 def resplit(conn, log=print, split=None, apply=True):
-    """Split every group again from scratch, balanced on the characters and the page types (mlops/splitting.py),
-    with `split` (val_fraction, test_fraction, split_tolerance, split_weights; default: the settings now).
-    apply=False: only computes it (the preview of the app). The dataset versions already made keep their own
-    splits (dataset_pages): the models trained on them stay traceable. -> {"pages", "groups", "coverage", "text"}."""
-    split = split or app_settings.split(conn)
-    backfill_page_types(conn)
-    groups, types, sizes = {}, {}, Counter()
-    for row in db.all_rows(conn, "SELECT id, group_key, page_type FROM pages ORDER BY id"):
-        groups.setdefault(row["group_key"], Counter()).update(page_characters(row["id"]))
-        types.setdefault(row["group_key"], Counter())[row["page_type"]] += 1
-        sizes[row["group_key"]] += 1
-    splits = assign_groups({}, groups, split["val_fraction"], split["test_fraction"], split["split_tolerance"],
-                           None, types, split["split_weights"])
-    if apply:
-        with conn.transaction():
-            for group, name in splits.items():
-                conn.execute("UPDATE pages SET split = %s WHERE group_key = %s", (name, group))
-    by_split, types_by_split = {s: Counter() for s in SPLITS}, {s: Counter() for s in SPLITS}
-    for group, characters in groups.items():
-        by_split[splits[group]].update(characters)
-        types_by_split[splits[group]].update(types[group])
-    pages = {s: sum(n for g, n in sizes.items() if splits[g] == s) for s in SPLITS}
-    counts = {s: sum(1 for g in groups if splits[g] == s) for s in SPLITS}
-    report = coverage(by_split, types_by_split)
-    text = (f"{len(groups)} groups split {'again' if apply else '(preview, not applied)'}: "
-            + ", ".join(f"{s} {pages[s]} pages ({counts[s]} groups)" for s in SPLITS) + "\n" + describe(report))
-    log(text)
-    return {"pages": pages, "groups": counts, "coverage": report, "text": text, "by_split": by_split,
-            "types": types_by_split}
+    """Split every writer (or group) again from scratch, balanced on the characters and the page types
+    (mlops/splitting.py), with `split` (split_by, val_fraction, test_fraction, split_tolerance, split_weights;
+    default: the settings now). apply=False: only computes it (the preview of the app). The dataset versions
+    already made keep their own splits (dataset_pages): the models trained on them stay traceable."""
+    return place(conn, split=split, fresh=True, apply=apply, log=log)

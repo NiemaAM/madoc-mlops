@@ -50,11 +50,19 @@ def dataset_table():
     with db.connection() as conn:
         backfill_page_types(conn)
         rows = db.all_rows(conn, "SELECT split, count(*) AS pages, sum(lines) AS lines, sum(characters) AS characters, "
-                                 "count(DISTINCT group_key) AS groups, count(*) FILTER (WHERE page_type = '1') AS p1, "
-                                 "count(*) FILTER (WHERE page_type = '2') AS p2 FROM pages GROUP BY split")
+                                 "count(DISTINCT group_key) AS groups, count(DISTINCT writer_key) AS writers, "
+                                 "count(*) FILTER (WHERE writer_key IS NULL) AS no_writer, "
+                                 "count(*) FILTER (WHERE held_out) AS held_out, "
+                                 "count(*) FILTER (WHERE page_type = '1') AS p1, "
+                                 "count(*) FILTER (WHERE page_type = '2') AS p2 FROM pages WHERE deleted_at IS NULL "
+                                 "GROUP BY split")
     by_split = {r["split"]: r for r in rows}
-    return [[s, *(int((by_split.get(s) or {}).get(k) or 0) for k in ("pages", "p1", "p2", "groups", "lines", "characters"))]
-            for s in SPLITS]
+    keys = ("pages", "p1", "p2", "writers", "no_writer", "held_out", "groups", "lines", "characters")
+    return [[s, *(int((by_split.get(s) or {}).get(k) or 0) for k in keys)] for s in SPLITS]
+
+
+DATASET_HEADERS = ["split", "pages", "page 1 (names)", "page 2 (details)", "writers", "pages without writer",
+                   "held out", "register-years", "lines", "characters"]
 
 
 # --- training options and split settings (mlops/settings.py) -----------------------------------------------
@@ -64,6 +72,7 @@ LABELS = {"start_from": "Start from", "epochs": "Epochs", "quit": "Stop", "lag":
           "kraken_augment": "kraken's line augmentation (--augment)",
           "use_augmented": "Add the augmented train pages (Data tab)", "workers": "Data loading workers",
           "precision": "Precision", "compile": "Compile the lines once (faster epochs)",
+          "seed": "Seed", "detailed_curves": "Detailed validation curves",
           "extra_args": "Other ketos options"}
 
 
@@ -89,12 +98,14 @@ def split_values():
         value = app_settings.split(conn)
     weights = value["split_weights"]
     types = weights.get("page_types") or {}
-    return [100 * value["val_fraction"], 100 * value["test_fraction"], 100 * value["split_tolerance"],
-            weights.get("missing_character", 1000), types.get("1", 1000), types.get("2", 1000)]
+    return [value.get("split_by", "writer"), 100 * value["val_fraction"], 100 * value["test_fraction"],
+            100 * value["split_tolerance"], weights.get("missing_character", 1000), types.get("1", 1000),
+            types.get("2", 1000)]
 
 
-def split_from_form(val, test, tolerance, missing, page1, page2):
+def split_from_form(split_by, val, test, tolerance, missing, page1, page2):
     return app_settings.check_split({
+        "split_by": split_by or "writer",
         "val_fraction": float(val or 0) / 100, "test_fraction": float(test or 0) / 100,
         "split_tolerance": float(tolerance or 0) / 100,
         "split_weights": {"missing_character": float(missing or 0),
@@ -138,13 +149,20 @@ COPY_VOCABULARY_JS = """
 
 def batches_table():
     out = []
-    for b in query("SELECT * FROM batches ORDER BY id DESC LIMIT 50"):
+    for b in query("SELECT b.*, (SELECT count(*) FROM pages p WHERE p.batch_id = b.id AND p.deleted_at IS NULL) "
+                   "AS live FROM batches b ORDER BY id DESC LIMIT 50"):
         report = b["report"] or {}
         added = report.get("added") or {}
-        out.append([b["id"], f'{b["created_at"]:%Y-%m-%d %H:%M}', b["status"],
-                    added.get("train", 0), added.get("val", 0), added.get("test", 0), report.get("duplicates", 0),
-                    report.get("rejected", 0), ", ".join(f"{k}: {v}" for k, v in (report.get("reasons") or {}).items())])
+        status = b["status"] + (" · deleted" if b["deleted_at"] and b["status"] != "purged" else "")
+        out.append([b["id"], f'{b["created_at"]:%Y-%m-%d %H:%M}', status, "yes" if b["held_out"] else "",
+                    b["live"], added.get("train", 0), added.get("val", 0), added.get("test", 0),
+                    report.get("duplicates", 0), report.get("rejected", 0),
+                    ", ".join(f"{k}: {v}" for k, v in (report.get("reasons") or {}).items())])
     return out
+
+
+BATCH_HEADERS = ["batch", "uploaded", "status", "held out", "pages now", "train at ingest", "val at ingest",
+                 "test at ingest", "duplicates", "rejected", "reasons"]
 
 
 def versions_table():
@@ -153,7 +171,7 @@ def versions_table():
             for v in query("SELECT * FROM dataset_versions ORDER BY id DESC LIMIT 20")]
 
 
-def on_upload(file):
+def on_upload(file, held_out=False):
     if not file:
         raise gr.Error("Choose the zip exported from eScriptorium (PageXML with images).")
     source = Path(file if isinstance(file, str) else file.name)
@@ -162,12 +180,14 @@ def on_upload(file):
     if source.stat().st_size > params()["ingest"]["max_upload_mb"] * 2 ** 20:
         raise gr.Error(f'The zip is larger than {params()["ingest"]["max_upload_mb"]} MB.')
     with db.connection() as conn:
-        batch = db.one(conn, "INSERT INTO batches (status) VALUES ('uploaded') RETURNING id")
+        batch = db.one(conn, "INSERT INTO batches (status, held_out) VALUES ('uploaded', %s) RETURNING id",
+                       bool(held_out))
         target = path("data") / "uploads" / f'batch-{batch["id"]}.zip'
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(source), target)
         job = jobs.enqueue(conn, "ingest", batch_id=batch["id"], upload=str(target))
-    gr.Info(f'Batch {batch["id"]} received: ingestion queued (job {job["id"]}).')
+    gr.Info(f'Batch {batch["id"]} received{" (held-out set: always in test)" if held_out else ""}: '
+            f'ingestion queued (job {job["id"]}).')
     return [None, batches_table(), jobs_table()]
 
 
@@ -197,6 +217,20 @@ def evaluation_choices():
             for e in query("SELECT * FROM evaluations ORDER BY id DESC LIMIT 50")]
 
 
+def with_ci(metrics, key):
+    value = metrics.get(key)
+    if value is None:
+        return "—"
+    low, high = metrics.get(f"{key}_low"), metrics.get(f"{key}_high")
+    return f"{value:.4g} [{low:.4g}, {high:.4g}]" if low is not None and high is not None else f"{value:.4g}"
+
+
+def metric_rows(candidate, production):
+    """Table rows "| metric | production [CI] | candidate [CI] |" (the 95 % intervals by writer, or by page)."""
+    keys = sorted(k for k, v in candidate.items() if isinstance(v, (int, float)) and not k.endswith(("_low", "_high")))
+    return [f"| {k} | {with_ci(production, k)} | {with_ci(candidate, k)} |" for k in keys]
+
+
 def evaluation_details(evaluation_id):
     if not evaluation_id:
         return "Choose an evaluation."
@@ -209,16 +243,16 @@ def evaluation_details(evaluation_id):
              f'**{"✓ Better" if e["passed"] else "✗ Not better"}**: {html.escape(e["message"])}', "",
              "| Metric | Production | Candidate |", "|---|---|---|"]
     production = e["production"] or {}
-    for key, value in sorted(e["candidate"].items()):
-        if isinstance(value, (int, float)):
-            lines.append(f"| {key} | {production.get(key, '—')} | {value} |")
-    lines += ["", f'Per page ({c["pages"]} test pages, {c["metric"]}, positive = the candidate is better): '
+    lines += metric_rows(e["candidate"], production)
+    lines += ["", "Intervals: 95 %, " + ("by writer (the writers drawn again)" if c.get("unit") == "writer"
+                                       else "by register-year or by page") + " — CER, WER in %; names in %.",
+              "", f'Per page ({c["pages"]} test pages, {c["metric"]}, positive = the candidate is better): '
                   f'mean gain **{c["gain"]:+.4f}**, {int(100 * c["confidence"])} % CI [{c["low"]:+.4f}, {c["high"]:+.4f}]']
     for subset, label in (("old", "pages the production model was evaluated on"), ("new", "pages added since")):
         if c.get(subset):
             lines.append(f'- {label}: {c[subset]["pages"]} pages, mean gain {c[subset]["gain"]:+.4f}')
     if c.get("group_gains"):
-        lines.append(f'- by register-year ({c["groups"]} groups, interval {c.get("interval", "by page")}): '
+        lines.append(f'- by {c.get("unit", "register-year")} ({c["groups"]} groups, interval {c.get("interval", "by page")}): '
                      + ", ".join(f'{v["gain"]:+.4f} on {v["pages"]} pages' for v in c["group_gains"].values()))
     excluded = {k: v for k, v in (c.get("excluded_pages") or {}).items() if v}
     if excluded:
@@ -286,6 +320,275 @@ def server_html():
     return "<div style='line-height:1.9'>" + "<br>".join(parts) + "</div>"
 
 
+# --- writers, missing pages, batches, normalisation, preview (private: the app only) --------------------------
+def writers_view():
+    """The writer table (fewest pages first), the spellings that look alike, the aliases."""
+    from mlops import writers
+    with db.connection() as conn:
+        writers.sync(conn)
+        table = writers.table(conn)
+        pairs = writers.variants(conn)
+        spellings = writers.raw_spellings(conn)
+        aliases = writers.aliases(conn)
+    rows = [[w["writer"], w["label"], w["pages"], w["acts"], w["page1"], w["page2"], w["incomplete_acts"],
+             ", ".join(f"{k} {v}" for k, v in sorted(w["splits"].items())), w["held_out"]] for w in table]
+    if pairs:
+        warning = ("⚠ **Spellings that may be the same officer** (merge them before splitting by writer, or the same "
+                   "hand may be in train and test):\n" + "\n".join(f"- {a} ({na} pages) / {b} ({nb} pages)"
+                                                                    for a, b, na, nb in pairs))
+    else:
+        warning = "No two writer names look alike."
+    names = sorted({name for name, _, _ in spellings} | {c for _, c, _ in spellings})
+    alias_rows = [[variant, canonical] for variant, canonical in sorted(aliases.items())]
+    return rows, warning, gr.update(choices=names), gr.update(choices=names), alias_rows
+
+
+WRITER_HEADERS = ["writer (private)", "label (W&B, figures)", "pages", "acts", "page 1", "page 2",
+                  "acts missing a page", "splits", "held out"]
+
+
+def on_alias(variant, canonical):
+    from mlops import writers
+    try:
+        with db.connection() as conn:
+            result = writers.add_alias(conn, variant, canonical)
+    except ValueError as e:
+        raise gr.Error(str(e)) from None
+    gr.Info(f"{variant} → {canonical}: {result['writers']} writers now. Split again (Split settings) to use it.")
+    return writers_view()
+
+
+def on_unalias(variant):
+    from mlops import writers
+    with db.connection() as conn:
+        writers.remove_alias(conn, variant)
+    return writers_view()
+
+
+def missing_view():
+    from mlops.missing import summary_rows
+    with db.connection() as conn:
+        return summary_rows(conn)
+
+
+def missing_download():
+    """The file names of the missing pages, as a text file to download (never in a job log)."""
+    import tempfile
+    from mlops.missing import listing
+    with db.connection() as conn:
+        text = listing(conn)
+    if not text:
+        raise gr.Error("No act is missing a page.")
+    target = Path(tempfile.mkdtemp(prefix="missing-")) / "pages_to_annotate.txt"
+    target.write_text(text, encoding="utf-8")
+    return str(target)
+
+
+def normalize_preview():
+    from mlops.ingest import normalize_dataset
+    from mlops.normalize import describe, table
+    with db.connection() as conn:
+        result = normalize_dataset(conn, log=lambda *_: None, apply=False)
+    rules = ", ".join(f"U+{ord(k):04X} → {'(deleted)' if v == '' else repr(v)}" for k, v in table().items())
+    return (f"Rules (params.yaml ingest.normalize): {rules or 'none'}\n\n"
+            f"**{result['pages']} pages would change**: {describe(result['replaced'])}")
+
+
+def on_normalize():
+    with db.connection() as conn:
+        if db.one(conn, "SELECT 1 AS x FROM jobs WHERE status IN ('queued', 'running') AND kind IN ('ingest', "
+                        "'normalize')"):
+            raise gr.Error("An ingestion or a normalisation is already queued or running.")
+    queue_job("normalize")
+    return jobs_table()
+
+
+def on_batch_action(batch_id, action, confirmation):
+    from mlops import batches
+    if not batch_id:
+        raise gr.Error("Type the number of the batch.")
+    try:
+        with db.connection() as conn:
+            if action == "delete":
+                n = batches.delete(conn, int(batch_id))
+                gr.Info(f"Batch {int(batch_id)}: {n} pages taken out of the dataset (restore brings them back).")
+            elif action == "restore":
+                n = batches.restore(conn, int(batch_id))
+                gr.Info(f"Batch {int(batch_id)}: {n} pages back in the dataset.")
+            else:
+                n = batches.purge(conn, int(batch_id), confirmation or "")
+                gr.Info(f"Batch {int(batch_id)}: {n} pages removed for good.")
+    except ValueError as e:
+        raise gr.Error(str(e)) from None
+    return batches_table(), dataset_table()
+
+
+def admins():
+    names = [n.strip() for n in os.environ.get("MLOPS_ADMINS", "").split(",") if n.strip()]
+    return names or [user for user, _ in logins()[:1]]
+
+
+def preview_info():
+    from mlops.preview import latest
+    file = latest()
+    if not file:
+        return "No preview made yet."
+    return f"Latest: `{file.name}` ({file.stat().st_size / 2 ** 20:.1f} MB)."
+
+
+def on_preview_build():
+    queue_job("preview")
+    return jobs_table()
+
+
+def on_preview_download(request: gr.Request):
+    """The preview zip, for an admin only; every download is recorded (table downloads)."""
+    import tempfile
+    from mlops.preview import latest, record_download
+    user = getattr(request, "username", None)
+    if user not in admins():
+        raise gr.Error("Only an admin of the app may download the preview (MLOPS_ADMINS).")
+    file = latest()
+    if not file:
+        raise gr.Error("Make the preview first.")
+    with db.connection() as conn:
+        record_download(conn, user, file.name)
+    target = Path(tempfile.mkdtemp(prefix="preview-")) / file.name
+    shutil.copyfile(file, target)
+    return str(target)
+
+
+# --- figures and experiments ----------------------------------------------------------------------------------
+def figures_of(folder):
+    """(gallery items, files to download: every PNG and PDF of the folder). The figures are copied to a temporary
+    folder first: the app serves them from there, never from the runs volume (which holds models and line images)."""
+    import tempfile
+    from mlops.charts import gallery
+    if not folder or not Path(folder).is_dir():
+        return [], []
+    copy = Path(tempfile.mkdtemp(prefix="figures-"))
+    files = []
+    for file in sorted(Path(folder).iterdir()):
+        if file.suffix in (".png", ".pdf"):
+            shutil.copyfile(file, copy / file.name)
+            files.append(str(copy / file.name))
+    items = [(str(copy / Path(png).name), text) for png, text in gallery(folder)]
+    return items, files
+
+
+def model_figures(model_id):
+    if not model_id:
+        return [], []
+    row = execute("SELECT figures FROM models WHERE id = %s", model_id)
+    return figures_of(row and row["figures"])
+
+
+def evaluation_figures(evaluation_id):
+    if not evaluation_id:
+        return [], []
+    row = execute("SELECT figures FROM evaluations WHERE id = %s", evaluation_id)
+    return figures_of(row and row["figures"])
+
+
+def experiments_table():
+    out = []
+    for e in query("SELECT * FROM experiments ORDER BY id DESC LIMIT 50"):
+        s = e["summary"] or {}
+        m, ci = s.get("metrics") or {}, s.get("ci") or {}
+        names = (s.get("names") or {}).get("all") or {}
+
+        def cell(key):
+            value = m.get(key)
+            if value is None:
+                return ""
+            low, high = (ci.get(key) or [None, None])
+            spread = (s.get("spread") or {}).get(key)
+            text = f"{value:.2f}" + (f" [{low:.2f}, {high:.2f}]" if low is not None else "")
+            return text + (f" (± {spread['sd']:.2f} over seeds)" if spread else "")
+        e2e = (s.get("pipeline") or {}).get("e2e_cer")
+        out.append([e["id"], e["kind"], e["name"], cell("cer"), cell("cer_lp"), cell("wer"),
+                    f'{names.get("exact", "")}' if names else "", f'{names.get("normalized", "")}' if names else "",
+                    "" if e2e is None else f"{e2e:.2f}", s.get("writers_count", ""), len(s.get("folds") or []) or "",
+                    f'{e["created_at"]:%Y-%m-%d %H:%M}'])
+    return out
+
+
+EXPERIMENT_HEADERS = ["experiment", "kind", "name", "CER % [CI]", "CER without spaces/punct. %", "WER %",
+                      "names exact %", "names normalised %", "end-to-end CER %", "writers", "folds", "created"]
+
+
+def experiment_choices():
+    return [(f'#{e["id"]} {e["name"]}', e["id"]) for e in query("SELECT id, name FROM experiments ORDER BY id DESC "
+                                                                  "LIMIT 50")]
+
+
+def experiment_details(experiment_id):
+    if not experiment_id:
+        return "Choose an experiment.", [], []
+    e = execute("SELECT * FROM experiments WHERE id = %s", experiment_id)
+    if not e:
+        return "Unknown experiment.", [], []
+    s = e["summary"]
+    lines = [f'### {html.escape(e["name"])} ({e["kind"]})',
+             f'{s.get("pages", 0)} test pages, {s.get("lines", 0)} lines, {s.get("chars", 0)} characters; '
+             f'intervals {s.get("interval", "")} ({s.get("writers_count", 0)} writers)', "",
+             "| metric | value | 95 % interval |" + (" mean ± sd over seeds |" if s.get("spread") else ""),
+             "|---|---|---|" + ("---|" if s.get("spread") else "")]
+    for key, value in (s.get("metrics") or {}).items():
+        low, high = (s.get("ci") or {}).get(key) or [None, None]
+        spread = (s.get("spread") or {}).get(key)
+        lines.append(f"| {key} | {value} | {'' if low is None else f'[{low}, {high}]'} |"
+                     + (f" {spread['mean']} ± {spread['sd']} |" if spread else ("" if not s.get("spread") else " |")))
+    names = s.get("names") or {}
+    if names:
+        lines += ["", "| names (field\\|page) | names | exact % | normalised % | CER % | label without name |",
+                  "|---|---|---|---|---|---|"]
+        lines += [f'| {k} | {v["names"]} | {v["exact"]} | {v["normalized"]} | {v["cer"]} | {v["label_without_name"]} |'
+                  for k, v in names.items()]
+    if s.get("folds"):
+        lines += ["", "Folds: " + "; ".join(f'{f["name"]} ({", ".join(f["writers"])}): test {f["test"]}, '
+                                           f'train {f["train"]}, val {f["val"]}' for f in s["folds"])]
+    if s.get("pipeline") or s.get("detection"):
+        p = s.get("pipeline") or {"e2e_cer": s["metrics"].get("cer"), **(s.get("detection") or {}),
+                                  "gt_cer": (s.get("true_lines") or {}).get("metrics", {}).get("cer")}
+        lines += ["", f'End to end (page 2): CER {p.get("e2e_cer")} % (true lines {p.get("gt_cer")} %), line '
+                      f'precision {p.get("precision", 0):.3f}, recall {p.get("recall", 0):.3f}']
+    items, files = figures_of(e["figures"])
+    return "\n".join(lines), items, files
+
+
+def model_options(task):
+    return [("production (MaDoc)", "production")] + [
+        (f'#{m["id"]} {m["artifact"]}', str(m["id"])) for m in query("SELECT * FROM models WHERE task = %s "
+                                                                     "ORDER BY id DESC LIMIT 30", task)]
+
+
+def on_crossval(recognizer, scheme, seeds, segmentation, options_text):
+    import json as json_
+    try:
+        seed_list = [int(x) for x in str(seeds or params()["seed"]).replace(" ", "").split(",") if x]
+    except ValueError:
+        raise gr.Error("Seeds: whole numbers separated by commas (e.g. 1,2,3).") from None
+    try:
+        options = json_.loads(options_text) if (options_text or "").strip() else {}
+    except ValueError as e:
+        raise gr.Error(f"Options: not JSON ({e})") from None
+    args = {"recognizer": recognizer, "scheme": scheme, "seeds": seed_list, "segmentation": bool(segmentation)}
+    if recognizer == "kraken":
+        with db.connection() as conn:
+            args["settings"] = {**app_settings.training(conn, "htr"), **options}
+            args["blla_settings"] = app_settings.training(conn, "blla")
+    else:
+        args["settings"] = options
+    queue_job("crossval", None, **args)
+    return jobs_table()
+
+
+def on_pipeline(segmentation, recognition):
+    queue_job("pipeline", None, segmentation=segmentation or "production", recognition=recognition or "production")
+    return jobs_table()
+
+
 def build_app():
     with gr.Blocks(title="MaDoc MLOps") as app:
         gr.Markdown("## MaDoc MLOps: dataset, training and evaluation of the kraken models")
@@ -293,29 +596,46 @@ def build_app():
             with gr.Row():
                 upload = gr.File(label="eScriptorium export (zip: PageXML + images)", file_types=[".zip"],
                                  type="filepath")
-                ingest_button = gr.Button("Ingest", variant="primary", scale=0)
-            gr.Markdown("**Dataset now** (pages are split by group: register and year)")
-            dataset_view = gr.Dataframe(headers=["split", "pages", "page 1 (names)", "page 2 (details)", "groups",
-                                                 "lines", "characters"],
-                                        value=dataset_table, interactive=False)
+                with gr.Column(scale=0, min_width=220):
+                    held_out = gr.Checkbox(label="Held-out set", value=False,
+                                           info="always in test: never trained on, augmented or moved by a split")
+                    ingest_button = gr.Button("Ingest", variant="primary")
+            gr.Markdown("**Dataset now** (split by writer: the officer named on page 2 of each act; see Split settings)")
+            dataset_view = gr.Dataframe(headers=DATASET_HEADERS, value=dataset_table, interactive=False)
             with gr.Accordion("Vocabulary (every character of the transcriptions and its count)", open=True):
                 with gr.Row(equal_height=True):
                     vocabulary_scope = gr.Radio(["all", *SPLITS], value="all", label="Pages", scale=3)
                     vocabulary_refresh = gr.Button("🔄 Refresh", scale=0)
-                gr.Markdown("Red: fewer than `ui.rare_characters` occurrences (params.yaml), too rare to be learned "
-                            "well. Dashed: never in the train pages, so the model cannot learn it. Hover a "
-                            "character for its Unicode name and its count in each split.")
+                gr.Markdown("The spaces and invisible characters are listed first. Red: fewer than "
+                            "`ui.rare_characters` occurrences (params.yaml), too rare to be learned well. Dashed: never "
+                            "in the train pages, so the model cannot learn it. Hover a character for its Unicode name "
+                            "and its count in each split.")
                 coverage_box = gr.HTML()
-                # copy: a button in the corner of the table, like the copy button of the other tables
                 vocabulary_copy = gr.Button(COPY_LABEL, size="sm", render=False)
                 vocabulary_box = gr.HTML(label="Characters", buttons=[vocabulary_copy], container=True, show_label=True)
-            with gr.Accordion("Split settings (rerun the split)", open=False):
-                gr.Markdown("The groups (register + year) are placed to balance the characters and the page types "
-                            "(see the summary above the vocabulary). **Preview** computes a split with these "
-                            "settings without changing anything; **Apply** saves the settings (also used by the next "
-                            "ingests) and splits the dataset again. Trainings already made keep their own dataset "
-                            "version; evaluate them again to compare on the new test set.")
+            with gr.Accordion("Writers (the officer of each act: what to annotate, spellings to merge)", open=False):
+                gr.Markdown("Read on page 2 (\"من طرفنا نحن … موظف جماعي\"); page 1 takes the writer of page 2 of the "
+                            "same act. The names stay in this app: W&B and the figures only see the labels. The "
+                            "fewest pages first.")
+                writers_table = gr.Dataframe(headers=WRITER_HEADERS, interactive=False)
+                writers_warning = gr.Markdown()
                 with gr.Row():
+                    alias_variant = gr.Dropdown(label="This spelling…", choices=[], allow_custom_value=True)
+                    alias_canonical = gr.Dropdown(label="…is the same officer as", choices=[], allow_custom_value=True)
+                    alias_button = gr.Button("Merge", scale=0)
+                    unalias_button = gr.Button("Undo (the first spelling)", scale=0)
+                aliases_table = gr.Dataframe(headers=["spelling", "same officer as"], interactive=False)
+                writers_refresh = gr.Button("🔄 Refresh the writers")
+            with gr.Accordion("Split settings (rerun the split)", open=False):
+                gr.Markdown("The writers (or the register-years) are placed to balance the characters and the page "
+                            "types; held-out pages stay in test, pages without a known writer stay in train. "
+                            "**Preview** computes a split with these settings without changing anything; **Apply** "
+                            "saves the settings (also used by the next ingests) and splits the dataset again. "
+                            "Trainings already made keep their own dataset version; evaluate them again to compare on "
+                            "the new test set.")
+                with gr.Row():
+                    split_by_choice = gr.Radio([("writer (writer-independent test)", "writer"),
+                                                ("register and year", "group")], label="Split by", value="writer")
                     split_val = gr.Number(label="Validation (% of the characters)", minimum=1, maximum=50)
                     split_test = gr.Number(label="Test (% of the characters)", minimum=1, maximum=50)
                     split_tolerance = gr.Number(label="Tolerance (% of a split's share)", minimum=0, maximum=100,
@@ -330,23 +650,52 @@ def build_app():
                     split_apply = gr.Button("Apply: save and split again", variant="primary")
                     split_reset = gr.Button("Reset to params.yaml")
                 split_result = gr.HTML()
+            with gr.Accordion("Normalisation of the transcriptions", open=False):
+                gr.Markdown("Invisible or look-alike characters replaced (params.yaml `ingest.normalize`): a no-break "
+                            "space looks exactly like a space. **Preview** counts what would change; **Normalize** "
+                            "rewrites the pages (a backup of the old files is kept in the data folder) and makes a "
+                            "new dataset version.")
+                with gr.Row():
+                    normalize_preview_button = gr.Button("Preview")
+                    normalize_button = gr.Button("Normalize the dataset", variant="primary")
+                normalize_result = gr.Markdown()
             with gr.Accordion("Augmentation of the train pages", open=False):
                 gr.Markdown("Noise, lighting, shadow, blur, scribbles, rotation and perspective, the lines of the "
                             "PageXML moved with the image (script/data_augmentation_xml.py). Train pages only: "
-                            "val and test stay real. A training that uses augmented pages takes the newest "
-                            "augmentation of its dataset version.")
+                            "val, test and the held-out set stay real. A training that uses augmented pages takes "
+                            "the newest augmentation of its dataset version.")
                 with gr.Row(equal_height=True):
                     augment_copies = gr.Number(label="Copies of each train page", precision=0, minimum=1,
                                                maximum=10, value=params()["augment"]["copies"], scale=1)
                     augment_seed = gr.Number(label="Seed", precision=0, value=params()["augment"]["seed"], scale=1)
                     augment_button = gr.Button("Augment the train pages", variant="primary", scale=1)
                 augmentations_view = gr.Markdown(augmentations_md)
-            gr.Markdown("**Batches** (one per uploaded zip; the splits as given at ingest: `resplit` may move "
-                        "groups later, the table above shows where the pages are now)")
-            batches_view = gr.Dataframe(headers=["batch", "uploaded", "status", "train at ingest", "val at ingest",
-                                                 "test at ingest",
-                                                 "duplicates", "rejected", "reasons"],
-                                        value=batches_table, interactive=False)
+            with gr.Accordion("Missing pages (acts with only one of their two pages annotated)", open=False):
+                missing_table = gr.Dataframe(headers=["register", "split", "complete acts", "missing page 1",
+                                                      "missing page 2"], interactive=False)
+                with gr.Row():
+                    missing_refresh = gr.Button("🔄 Refresh")
+                    missing_button = gr.Button("Download the list of the pages to annotate")
+                missing_file = gr.File(label="Pages to annotate (original file names)", interactive=False)
+            gr.Markdown("**Batches** (one per uploaded zip). Delete takes the pages out of the dataset (restore "
+                        "brings them back); Purge removes a deleted batch for good, only when no model used it.")
+            batches_view = gr.Dataframe(headers=BATCH_HEADERS, value=batches_table, interactive=False)
+            with gr.Row(equal_height=True):
+                batch_pick = gr.Number(label="Batch", precision=0, scale=1)
+                batch_delete = gr.Button("Delete", variant="stop", scale=0)
+                batch_restore = gr.Button("Restore", scale=0)
+                batch_confirm = gr.Textbox(label="Purge: type PURGE <batch>", scale=2)
+                batch_purge = gr.Button("Purge for good", variant="stop", scale=0)
+            with gr.Accordion("Preview of the dataset as shuffled line images (contains personal data)", open=False):
+                gr.Markdown("Every line cut out along its polygon, shuffled across the pages of its split and renamed "
+                            "by split, with its transcription. **It is not anonymised**: names, dates and the "
+                            "handwriting stay. Only an admin of the app (MLOPS_ADMINS) can download it, and every "
+                            "download is recorded. The trainings keep using the PageXML pages.")
+                with gr.Row():
+                    preview_build = gr.Button("Make the preview zip")
+                    preview_download = gr.Button("Download (admin)")
+                preview_status = gr.Markdown(preview_info)
+                preview_file = gr.File(label="Preview zip", interactive=False)
             gr.Markdown("**Dataset versions** (made when a job needs one: the exact pages of a training)")
             versions_view = gr.Dataframe(headers=["version", "digest", "created", *SPLITS], value=versions_table,
                                          interactive=False)
@@ -385,11 +734,19 @@ def build_app():
                             reset_buttons[task] = gr.Button("Reset", scale=1)
             models_view = gr.Dataframe(headers=["model", "task", "status", "W&B artifact", "dataset version",
                                                 "validation", "created"], value=models_table, interactive=False)
+            with gr.Accordion("Figures of a training (PNG / PDF)", open=False):
+                model_figure_pick = gr.Dropdown(label="Model", choices=model_choices(), value=None)
+                model_gallery = gr.Gallery(label="Figures", columns=2, height=520)
+                model_files = gr.File(label="Download", file_count="multiple", interactive=False)
         with gr.Tab("Browse"):
             with gr.Row(equal_height=True):
                 browse_split = gr.Radio([*SPLITS, browse.AUGMENTED], value="train", label="Pages", scale=3)
                 browse_type = gr.Dropdown(browse.type_choices(), value="all", label="Page type", scale=2)
                 browse_lines = gr.Checkbox(label="Draw the lines", value=True, scale=1)
+                browse_names = gr.Checkbox(label="Show original names", value=False, scale=1,
+                                           info="off for screenshots")
+            browse_search = gr.Textbox(label="Search an original name or an id (any split)",
+                                       placeholder="e.g. 03010108_1_1_I_2004_12")
             browse_note = gr.Markdown()
             browse_list = gr.State([])
             with gr.Row(equal_height=True):
@@ -403,16 +760,50 @@ def build_app():
             with gr.Accordion("PageXML", open=False):
                 browse_xml = gr.Code(language="html", interactive=False, lines=30, max_lines=30)
         with gr.Tab("Evaluate"):
-            gr.Markdown("The candidate and the production model on the same test pages (old + new), live in W&B.")
+            gr.Markdown("The candidate and the production model on the same test pages (old + new), live in W&B. "
+                        "Every number has its 95 % interval (by writer).")
             with gr.Row():
                 model_pick = gr.Dropdown(label="Candidate model", choices=model_choices(), value=None, scale=3)
                 evaluate_button = gr.Button("Evaluate against production", variant="primary", scale=1)
             evaluations_view = gr.Dataframe(headers=["evaluation", "task", "model", "verdict", "gain [CI]", "pages",
                                                      "pull request", "created"], value=evaluations_table,
                                             interactive=False)
+            with gr.Accordion("Full pipeline: a segmentation model and a recognition model together (page 2)",
+                              open=False):
+                gr.Markdown("The segmentation finds the lines of every page-2 test image, the recognition reads them, "
+                            "as MaDoc does: CER on the true lines, end-to-end CER (what the segmentation adds), line "
+                            "detection, names. The result is in the Experiments tab.")
+                with gr.Row():
+                    pipeline_seg = gr.Dropdown(label="Segmentation", choices=model_options("blla"), value="production")
+                    pipeline_rec = gr.Dropdown(label="Recognition", choices=model_options("htr"), value="production")
+                    pipeline_button = gr.Button("Evaluate the pipeline", variant="primary", scale=0)
+        with gr.Tab("Experiments"):
+            gr.Markdown("A recognizer trained and tested on **writers it never saw** (one fold per writer, every "
+                        "page tested once), or on the dataset's own split. Kraken (the HTR options of the Train tab), "
+                        "a CRNN, a TrOCR-style model or Qwen2.5-VL-3B (LoRA): the same folds, the same line "
+                        "images, scored by the same code. The other recognizers run in the baselines container.")
+            with gr.Row():
+                cv_recognizer = gr.Radio([("Kraken", "kraken"), ("CRNN", "crnn"), ("TrOCR-style", "trocr"),
+                                          ("Qwen2.5-VL-3B", "qwen")], value="kraken", label="Recognizer")
+                cv_scheme = gr.Radio([("cross-validation by writer", "writers"), ("the dataset's split", "split")],
+                                     value="writers", label="Pages")
+            with gr.Row():
+                cv_seeds = gr.Textbox(label="Seeds", value=str(params()["seed"]),
+                                      info="several (1,2,3): every fold trained once per seed, mean ± sd")
+                cv_segmentation = gr.Checkbox(label="Kraken: also train the segmentation per fold (end to end, page 2)")
+                cv_options = gr.Textbox(label="Options (JSON, optional)",
+                                        placeholder='kraken: {"lag": 10}; crnn: {"epochs": 100}; qwen: {"epochs": 2}')
+                cv_button = gr.Button("Run", variant="primary", scale=0)
+            experiments_view = gr.Dataframe(headers=EXPERIMENT_HEADERS, value=experiments_table, interactive=False)
+            experiment_pick = gr.Dropdown(label="Experiment", choices=experiment_choices(), value=None)
+            experiment_text = gr.Markdown()
+            experiment_gallery = gr.Gallery(label="Figures", columns=2, height=520)
+            experiment_files = gr.File(label="Download (PNG / PDF)", file_count="multiple", interactive=False)
         with gr.Tab("Compare & release"):
             evaluation_pick = gr.Dropdown(label="Evaluation", choices=evaluation_choices(), value=None)
             details = gr.Markdown("Choose an evaluation.")
+            evaluation_gallery = gr.Gallery(label="Figures", columns=2, height=520)
+            evaluation_files = gr.File(label="Download (PNG / PDF)", file_count="multiple", interactive=False)
             with gr.Row():
                 override = gr.Checkbox(label="Open anyway (the candidate did not pass the gate)", value=False)
                 release_button = gr.Button("Open a pull request on MaDoc", variant="primary")
@@ -426,12 +817,29 @@ def build_app():
         with gr.Tab("Server"):
             server_view = gr.HTML(server_html)
 
-        # events
-        ingest_button.click(on_upload, [upload], [upload, batches_view, jobs_view])
+        # events: data
+        ingest_button.click(on_upload, [upload, held_out], [upload, batches_view, jobs_view])
         vocabulary_scope.change(vocabulary_view, [vocabulary_scope], [coverage_box, vocabulary_box])
         vocabulary_refresh.click(vocabulary_view, [vocabulary_scope], [coverage_box, vocabulary_box])
         app.load(vocabulary_view, [vocabulary_scope], [coverage_box, vocabulary_box])
         vocabulary_copy.click(None, None, None, js=COPY_VOCABULARY_JS)
+        writer_outputs = [writers_table, writers_warning, alias_variant, alias_canonical, aliases_table]
+        writers_refresh.click(writers_view, None, writer_outputs)
+        app.load(writers_view, None, writer_outputs)
+        alias_button.click(on_alias, [alias_variant, alias_canonical], writer_outputs)
+        unalias_button.click(on_unalias, [alias_variant], writer_outputs)
+        missing_refresh.click(missing_view, None, [missing_table])
+        app.load(missing_view, None, [missing_table])
+        missing_button.click(missing_download, None, [missing_file])
+        normalize_preview_button.click(normalize_preview, None, [normalize_result])
+        normalize_button.click(on_normalize, None, [jobs_view])
+        batch_delete.click(lambda b: on_batch_action(b, "delete", ""), [batch_pick], [batches_view, dataset_view])
+        batch_restore.click(lambda b: on_batch_action(b, "restore", ""), [batch_pick], [batches_view, dataset_view])
+        batch_purge.click(lambda b, c: on_batch_action(b, "purge", c), [batch_pick, batch_confirm],
+                          [batches_view, dataset_view])
+        preview_build.click(on_preview_build, None, [jobs_view])
+        preview_download.click(on_preview_download, None, [preview_file])
+
         def on_train(task, *values):
             keys = app_settings.TASK_FIELDS[task]
             try:
@@ -454,8 +862,10 @@ def build_app():
             train_buttons[task].click(lambda *v, t=task: on_train(t, *v), inputs, [jobs_view])
             reset_buttons[task].click(lambda t=task: on_reset(t), None, inputs)
             app.load(lambda t=task: training_values(t), None, inputs)
+        model_figure_pick.change(model_figures, [model_figure_pick], [model_gallery, model_files])
 
-        split_inputs = [split_val, split_test, split_tolerance, split_missing, split_page1, split_page2]
+        split_inputs = [split_by_choice, split_val, split_test, split_tolerance, split_missing, split_page1,
+                        split_page2]
 
         def split_html(result):
             from mlops.vocabulary import coverage_html
@@ -502,20 +912,27 @@ def build_app():
 
         augment_button.click(on_augment, [augment_copies, augment_seed], [jobs_view])
 
-        def browse_options(split, kind):
+        # browse
+        def browse_options(split, kind, names, search):
             with db.connection() as conn:
-                options, note = browse.choices(conn, split, kind or "all")
+                options, note = browse.choices(conn, split, kind or "all", bool(names), search or "")
             first = options[0][1] if options else None
             return gr.update(choices=options, value=first), options, note
 
-        browse_split.change(browse_options, [browse_split, browse_type], [browse_page, browse_list, browse_note])
-        browse_type.change(browse_options, [browse_split, browse_type], [browse_page, browse_list, browse_note])
-        app.load(browse_options, [browse_split, browse_type], [browse_page, browse_list, browse_note])
-        browse_page.change(browse.show, [browse_page, browse_lines], [browse_image, browse_text, browse_xml, browse_info])
-        browse_lines.change(browse.show, [browse_page, browse_lines], [browse_image, browse_text, browse_xml, browse_info])
+        browse_inputs = [browse_split, browse_type, browse_names, browse_search]
+        browse_outputs = [browse_page, browse_list, browse_note]
+        for component in (browse_split, browse_type, browse_names):
+            component.change(browse_options, browse_inputs, browse_outputs)
+        browse_search.submit(browse_options, browse_inputs, browse_outputs)
+        app.load(browse_options, browse_inputs, browse_outputs)
+        shown = [browse_image, browse_text, browse_xml, browse_info]
+        browse_page.change(browse.show, [browse_page, browse_lines, browse_names], shown)
+        browse_lines.change(browse.show, [browse_page, browse_lines, browse_names], shown)
+        browse_names.change(browse.show, [browse_page, browse_lines, browse_names], shown)
         browse_previous.click(lambda options, value: browse.step(options, value, -1), [browse_list, browse_page], [browse_page])
         browse_next.click(lambda options, value: browse.step(options, value, 1), [browse_list, browse_page], [browse_page])
 
+        # evaluate, experiments, release
         def on_evaluate(model_id):
             if not model_id:
                 raise gr.Error("Choose a candidate model.")
@@ -524,7 +941,12 @@ def build_app():
             return jobs_table()
 
         evaluate_button.click(on_evaluate, [model_pick], [jobs_view])
+        pipeline_button.click(on_pipeline, [pipeline_seg, pipeline_rec], [jobs_view])
+        cv_button.click(on_crossval, [cv_recognizer, cv_scheme, cv_seeds, cv_segmentation, cv_options], [jobs_view])
+        experiment_pick.change(experiment_details, [experiment_pick],
+                               [experiment_text, experiment_gallery, experiment_files])
         evaluation_pick.change(evaluation_details, [evaluation_pick], [details])
+        evaluation_pick.change(evaluation_figures, [evaluation_pick], [evaluation_gallery, evaluation_files])
 
         def on_release(evaluation_id, anyway):
             if not evaluation_id:
@@ -553,11 +975,15 @@ def build_app():
         gr.Timer(3).tick(job_log, [job_pick], [log_view])
         gr.Timer(5).tick(server_html, None, [server_view])
         gr.Timer(10).tick(lambda: [dataset_table(), batches_table(), versions_table(), models_table(),
-                                   evaluations_table(), jobs_table(), augmentations_md(),
-                                   gr.update(choices=model_choices()), gr.update(choices=evaluation_choices())],
+                                   evaluations_table(), jobs_table(), augmentations_md(), experiments_table(),
+                                   preview_info(),
+                                   gr.update(choices=model_choices()), gr.update(choices=evaluation_choices()),
+                                   gr.update(choices=model_choices()), gr.update(choices=experiment_choices()),
+                                   gr.update(choices=model_options("blla")), gr.update(choices=model_options("htr"))],
                           None, [dataset_view, batches_view, versions_view, models_view, evaluations_view, jobs_view,
-                                 augmentations_view,
-                                 model_pick, evaluation_pick])
+                                 augmentations_view, experiments_view, preview_status,
+                                 model_pick, evaluation_pick, model_figure_pick, experiment_pick,
+                                 pipeline_seg, pipeline_rec])
     return app
 
 

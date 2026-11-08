@@ -30,3 +30,11 @@ def database_url():
     if not url:
         raise RuntimeError("MLOPS_DATABASE_URL is not set (see .env)")
     return url
+
+
+def keyed(value):
+    """A keyed hash (MLOPS_SECRET) of a name that must not be stored as is: a group, an act, a writer."""
+    import hashlib
+    import hmac
+    secret = os.environ.get("MLOPS_SECRET", "").encode() or b"change-me"
+    return hmac.new(secret, value.encode(), hashlib.sha256).hexdigest()[:16]

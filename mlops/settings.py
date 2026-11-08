@@ -28,13 +28,16 @@ TRAIN_FIELDS = {
     "workers": (int, "processes preparing the batches while the GPU trains (ketos --workers; 0: none)"),
     "precision": (str, "32-true: kraken's default; bf16-mixed: faster on the RTX 50 series, check the accuracy"),
     "compile": (bool, "HTR: the lines cut out of the pages once into a binary file (ketos compile), not every epoch"),
+    "seed": (int, "ketos --seed: the same data and seed give the same training; another seed measures the variance"),
+    "detailed_curves": (bool, "HTR: after training, every epoch's checkpoint reads the validation lines: CER with "
+                              "and without spaces and punctuation, per script, per epoch (slower)"),
     "extra_args": (str, "any other ketos option, as on the command line"),
 }
-HTR_ONLY = ("batch_size", "compile")
+HTR_ONLY = ("batch_size", "compile", "detailed_curves")
 TASK_FIELDS = {"htr": list(TRAIN_FIELDS), "blla": [k for k in TRAIN_FIELDS if k not in HTR_ONLY]}
 CHOICES = {"quit": ["early", "fixed"], "resize": ["union", "new"], "precision": ["32-true", "bf16-mixed", "16-mixed"],
            "schedule": ["constant", "cosine", "exponential", "step", "reduceonplateau", "1cycle"]}
-SPLIT_KEYS = ("val_fraction", "test_fraction", "split_tolerance", "split_weights")
+SPLIT_KEYS = ("split_by", "val_fraction", "test_fraction", "split_tolerance", "split_weights")
 
 
 def saved(conn, name):
@@ -62,12 +65,13 @@ def default_training(task):
            "cos_max": p.get("cos_max"), "kraken_augment": bool(p.get("kraken_augment", False)),
            "use_augmented": bool(p.get("use_augmented", False)), "workers": p.get("workers", 4),
            "precision": p.get("precision") or "32-true", "compile": bool(p.get("compile", True)),
+           "seed": p.get("seed", params().get("seed")), "detailed_curves": bool(p.get("detailed_curves", False)),
            "extra_args": extra if isinstance(extra, str) else shlex.join(str(a) for a in extra)}
     return {k: v for k, v in out.items() if k in TASK_FIELDS[task]}
 
 
 # the smallest value of the numeric options (None: kraken's default); epochs -1 is "until early stopping"
-MINIMUM = {"epochs": -1, "lag": 1, "min_epochs": 0, "batch_size": 1, "cos_max": 1, "workers": 0}
+MINIMUM = {"epochs": -1, "lag": 1, "min_epochs": 0, "batch_size": 1, "cos_max": 1, "workers": 0, "seed": 0}
 
 
 def typed(key, value):
@@ -121,7 +125,8 @@ def training(conn, task):
 
 def default_split():
     ingest = params()["ingest"]
-    return {"val_fraction": ingest["val_fraction"], "test_fraction": ingest["test_fraction"],
+    return {"split_by": ingest.get("split_by") or "writer",
+            "val_fraction": ingest["val_fraction"], "test_fraction": ingest["test_fraction"],
             "split_tolerance": ingest.get("split_tolerance", 0.33),
             "split_weights": ingest.get("split_weights") or {}}
 
@@ -136,6 +141,8 @@ def split(conn):
 
 
 def check_split(value):
+    if value.get("split_by", "writer") not in ("writer", "group"):
+        raise ValueError("split by: writer or group (register and year)")
     val, test, tolerance = value["val_fraction"], value["test_fraction"], value["split_tolerance"]
     if not (0 < val < 1 and 0 < test < 1 and val + test < 1):
         raise ValueError("val and test must be between 0 and 100 %, together below 100 %")

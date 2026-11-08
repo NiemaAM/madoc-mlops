@@ -36,7 +36,8 @@ def report(conn):
     type_pattern, group_pattern = settings.get("page_type_pattern"), settings.get("group_pattern")
     acts = defaultdict(dict)        # act template -> {type: split}
     others = defaultdict(int)
-    for row in db.all_rows(conn, "SELECT o.original_name, p.split FROM page_origins o JOIN pages p ON p.id = o.page_id"):
+    for row in db.all_rows(conn, "SELECT o.original_name, p.split FROM page_origins o JOIN pages p ON p.id = o.page_id "
+                                 "WHERE p.deleted_at IS NULL"):
         stem = Path(row["original_name"]).stem
         template, kind = act_of(stem, type_pattern)
         if template is None:
@@ -58,6 +59,28 @@ def report(conn):
     for entry in out.values():
         entry["split"] = "/".join(sorted(entry["split"]))
     return out
+
+
+def listing(conn):
+    """The file names of the missing pages, one per line, by register (the download of the app)."""
+    labels = params()["ingest"].get("page_types") or {}
+    out = []
+    for register, entry in report(conn).items():
+        for kind in TYPES:
+            if entry["missing"][kind]:
+                out.append(f'# {register} ({entry["split"]}): {labels.get(kind, "page " + kind)} to annotate')
+                out += entry["missing"][kind]
+    return "\n".join(out) + "\n" if out else ""
+
+
+def summary_rows(conn):
+    """[register, split, complete acts, missing page 1, missing page 2] and a total row (the app's table)."""
+    rows, totals = [], [0, 0, 0]
+    for register, entry in report(conn).items():
+        counts = [entry["complete"], len(entry["missing"]["1"]), len(entry["missing"]["2"])]
+        rows.append([register, entry["split"], *counts])
+        totals = [a + b for a, b in zip(totals, counts)]
+    return rows + ([["total", "", *totals]] if rows else [])
 
 
 def print_report(conn, with_names=False):

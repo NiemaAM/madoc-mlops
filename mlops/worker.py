@@ -24,6 +24,8 @@ from mlops.process import Cancelled
 from mlops.train import train
 
 NAME = os.environ.get("MLOPS_WORKER_NAME") or socket.gethostname()
+# the queues this worker takes: "kraken" (main image) or "baselines" (the image with the other recognizers)
+QUEUES = tuple(q.strip() for q in os.environ.get("MLOPS_WORKER_QUEUES", "kraken").split(",") if q.strip())
 HEARTBEAT_SECONDS = 30
 
 
@@ -62,7 +64,28 @@ def run_release(conn, job, log, should_stop, set_wandb_url):
     return {"pr_url": url}
 
 
-HANDLERS = {"ingest": run_ingest, "augment": run_augment, "train": train, "evaluate": evaluate, "release": run_release}
+def run_normalize(conn, job, log, should_stop, set_wandb_url):
+    from mlops.ingest import normalize_dataset
+    return normalize_dataset(conn, log)
+
+
+def run_preview(conn, job, log, should_stop, set_wandb_url):
+    from mlops.preview import build
+    return build(conn, log, should_stop)
+
+
+def run_crossval(conn, job, log, should_stop, set_wandb_url):
+    from mlops.crossval import crossval
+    return crossval(conn, job, log, should_stop, set_wandb_url)
+
+
+def run_pipeline(conn, job, log, should_stop, set_wandb_url):
+    from mlops.crossval import pipeline_job
+    return pipeline_job(conn, job, log, should_stop, set_wandb_url)
+
+
+HANDLERS = {"ingest": run_ingest, "augment": run_augment, "train": train, "evaluate": evaluate, "release": run_release,
+            "normalize": run_normalize, "preview": run_preview, "crossval": run_crossval, "pipeline": run_pipeline}
 
 
 def heartbeat_loop(state, stop):
@@ -106,17 +129,18 @@ def main(once=False):
     state, stop = {}, threading.Event()
     threading.Thread(target=heartbeat_loop, args=(state, stop), daemon=True).start()
     with db.connection() as conn:
-        jobs.recover(conn)
+        jobs.recover(conn, QUEUES)
         pruned = jobs.prune_logs(conn, params().get("jobs", {}).get("log_retention_days"))
         if pruned:
             print(f"{pruned} log lines of old jobs deleted (jobs.log_retention_days)", flush=True)
-        try:
-            from mlops.settings import publish_models
-            publish_models(conn, release.sync())
-            release.mark_production()
-        except Exception as e:
-            print(f"MaDoc clone not synced yet: {e}", flush=True)
-        print(f"worker {NAME} ready", flush=True)
+        if "kraken" in QUEUES:
+            try:
+                from mlops.settings import publish_models
+                publish_models(conn, release.sync())
+                release.mark_production()
+            except Exception as e:
+                print(f"MaDoc clone not synced yet: {e}", flush=True)
+        print(f"worker {NAME} ready (queues: {', '.join(QUEUES)})", flush=True)
         from mlops.settings import paused
         while True:
             if paused(conn):   # a deployment is waiting for the running job: take no new one
@@ -124,7 +148,7 @@ def main(once=False):
                     break
                 time.sleep(3)
                 continue
-            job = jobs.claim(conn)
+            job = jobs.claim(conn, QUEUES)
             if job is None:
                 if once:
                     break

@@ -109,3 +109,59 @@ CREATE TABLE IF NOT EXISTS settings (
     value       jsonb NOT NULL,
     updated_at  timestamptz NOT NULL DEFAULT now()
 );
+
+-- held-out batches: their pages are always in test (never trained on, never augmented, never moved by a split)
+ALTER TABLE batches ADD COLUMN IF NOT EXISTS held_out boolean NOT NULL DEFAULT false;
+-- a deleted batch: its pages leave the dataset (the files stay while a dataset version uses them)
+ALTER TABLE batches ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
+
+-- the act of a page (keyed hash of "<register>_<year>_<act>"): both pages of an act always share their split
+ALTER TABLE pages ADD COLUMN IF NOT EXISTS act_key text;
+-- the writer of the page (keyed hash of the officer's canonical name, read on page 2 of its act); null: unknown
+ALTER TABLE pages ADD COLUMN IF NOT EXISTS writer_key text;
+-- a split no placement may change: "test" for a held-out page, the split given to "mlops.cli import --split"
+ALTER TABLE pages ADD COLUMN IF NOT EXISTS pinned_split text;
+ALTER TABLE pages ADD COLUMN IF NOT EXISTS held_out boolean NOT NULL DEFAULT false;
+ALTER TABLE pages ADD COLUMN IF NOT EXISTS deleted_at timestamptz;
+CREATE INDEX IF NOT EXISTS pages_live ON pages (split) WHERE deleted_at IS NULL;
+
+-- PRIVATE: the name of the officer written in the page ("من طرفنا نحن ... موظف جماعي"), as transcribed. Shown in
+-- the app (writers, aliases) to the person who runs it; never logged, never sent to W&B (only writer_key is).
+CREATE TABLE IF NOT EXISTS page_writers (
+    page_id  text PRIMARY KEY REFERENCES pages(id),
+    raw_name text NOT NULL
+);
+
+-- PRIVATE: spellings of the same officer ("لحسن اشميطي" -> "لحسن شميطي"), keys and values normalised
+CREATE TABLE IF NOT EXISTS writer_aliases (
+    variant    text PRIMARY KEY,
+    canonical  text NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- the worker that runs a job: "kraken" (the main worker) or "baselines" (CRNN, TrOCR, Qwen: their own container)
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS queue text NOT NULL DEFAULT 'kraken';
+
+-- who downloaded what from the app (the pseudonymised preview contains personal data)
+CREATE TABLE IF NOT EXISTS downloads (
+    id         serial PRIMARY KEY,
+    at         timestamptz NOT NULL DEFAULT now(),
+    username   text,
+    what       text NOT NULL
+);
+
+-- the results of the experiments (cross-validation, other recognizers, full pipeline): numbers only, and the
+-- folder of their figures
+CREATE TABLE IF NOT EXISTS experiments (
+    id         serial PRIMARY KEY,
+    job_id     integer REFERENCES jobs(id),
+    kind       text NOT NULL,                              -- crossval, pipeline
+    name       text NOT NULL,
+    summary    jsonb NOT NULL,
+    figures    text,
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+
+-- the folder of the figures of an evaluation (PNG / PDF, shown and downloaded in the app)
+ALTER TABLE evaluations ADD COLUMN IF NOT EXISTS figures text;
+ALTER TABLE models ADD COLUMN IF NOT EXISTS figures text;

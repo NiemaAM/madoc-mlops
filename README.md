@@ -25,7 +25,8 @@ one to MaDoc as a pull request. Everything runs on the GPU machine; the pages ne
 | `madoc` | MaDoc | the web app (kraken, NER) | yes | the public link (Tailscale funnel) |
 | `madoc-ollama` | MaDoc | Ollama + Gemma (spelling, translation) | yes | `madoc`; the worker, to unload Gemma |
 | `mlops-ui` | this repository | upload, buttons, jobs and live logs, comparisons, server resources | NVML only | your tailnet only (`tailscale serve`), with a login |
-| `mlops-worker` | this repository | runs the jobs one at a time: ingestion, training, evaluation, pull request | yes | nothing (no port) |
+| `mlops-worker` | this repository | runs the jobs one at a time: ingestion, training, evaluation, experiments, pull request | yes | nothing (no port) |
+| `mlops-baselines` | this repository | the other recognizers (CRNN, TrOCR-style, Qwen2.5-VL-3B): the same platform plus transformers / peft (`Dockerfile.baselines`); starts a job only when no other job runs | yes | nothing (no port) |
 | `db` | this repository | PostgreSQL: pages, dataset versions, jobs and logs, models, evaluations | no | the two containers above only |
 
 The two projects are separate Docker Compose projects: deploying MaDoc never restarts a training, and the only
@@ -36,11 +37,11 @@ links between them are the shared GPU, the `madoc-shared` network (to unload Gem
 | Step | Details |
 |---|---|
 | Ingest | Every page is checked (image, size, lines, baselines, transcription). It is renamed to an opaque id (start of the SHA-256 of its image): the original file name, which identifies a real record, is only in the private table `page_origins`. This is pseudonymisation, not anonymisation: the images and the texts still show names and dates, so the data stays personal data and stays on this machine. |
-| Split | By group: the pages of the same register and year (from the original file name, `params.yaml: ingest.group_pattern`) land in the same split. A test page is never a near-copy of a train page; a group keeps its split forever. New groups are placed to balance the **characters and page types** (`mlops/splitting.py`): 70 / 15 / 15 of the characters (± `split_tolerance`), both page types in every split with each split holding its share of the page 2 (± `split_tolerance`; page 2 weighs most, `split_weights`), every character in train, val and test whenever the groups allow it (missing from train weighs most), and the same character distribution in every split. No split stays empty, even with few registers. The ingest log reports the coverage. |
+| Split | By **writer** (default, `ingest.split_by`): the officer named on page 2 of each act ("من طرفنا نحن … موظف جماعي") is read from the transcription; page 1 takes the writer of page 2 of its act, so both pages of an act always share their split, and no writer of the test pages is in train or val (a writer-independent test). Pages whose act has no page 2 yet have no writer: they are trained on, never tested. Spellings of the same officer are merged in the app (Data → Writers). With fewer than 3 writers found, or `split_by: group`, by register-year as before. **Held-out** batches (a box at upload) stay in test for good. A writer (or group) keeps its split; new ones are placed to balance the **characters and page types** (`mlops/splitting.py`): 70 / 15 / 15 of the characters (± `split_tolerance`), both page types in every split with each split holding its share of the page 2 (± `split_tolerance`; page 2 weighs most, `split_weights`), every character in train, val and test whenever the groups allow it (missing from train weighs most), and the same character distribution in every split. No split stays empty, even with few registers. The ingest log reports the coverage. |
 | Dataset version | When a job starts, the pages and their splits are frozen into a version (`dataset_versions`). A model records the version it was trained on, an evaluation the version of its test pages. |
 | Augmentation | `script/data_augmentation_xml.py` (augraphy), train pages only, made once per version and reused. |
 | Train | Fine-tunes MaDoc's production model with ketos until early stopping; metrics live in W&B; the best checkpoint is exported and registered in W&B (alias `candidate`) and in the database. |
-| Evaluate | The candidate and the production model on the same test pages (old and new): the ketos numbers, and a number per page (HTR: CER with the true lines; blla: segmentation + production HTR, words found). The gain per page and its 95 % confidence interval (bootstrap). The gate (`params.yaml: gate`) says "better" only when the whole interval is above zero and the model is not worse on the old test pages. |
+| Evaluate | The candidate and the production model on the same test pages (old and new): the ketos numbers, every line read (`mlops/recognize.py`) and scored (`mlops/scoring.py`): CER with and without spaces and punctuation, WER, line exact match, CER per script, the child's names (page 1 and page 2: exact, normalised, CER), each with its 95 % interval **by writer**; the error composition, the confusions, the CER per form row and per writer (figures in the app, PNG / PDF). The gain per page and its 95 % confidence interval (bootstrap). The gate (`params.yaml: gate`) says "better" only when the whole interval is above zero and the model is not worse on the old test pages. |
 | Release | One click opens the pull request on MaDoc: the model, `models/MODEL_CARD.json` (W&B version, dataset version, test metrics) and the comparison. You merge it, MaDoc's deploy workflow puts it in production. Reverting the pull request rolls it back. |
 
 ---
@@ -276,7 +277,51 @@ the lines follows the image, so the augmented pages serve blla as well as HTR. *
 
 **Browse** shows the pages of a split (or the augmented ones), filtered by page type: the image with its line
 polygons (blue) and baselines (red, numbered), the transcription line by line, and the PageXML. Pages are shown by
-their id; the original names never reach the app.
+their id; **Show original names** (off by default, so a screenshot shows none) adds the original file name and the
+writer, and the search box finds a page by its original name in any split. The names stay in the app: never in a
+job log, W&B or a figure.
+
+### Writers, batches, missing pages, preview
+
+- **Data → Writers**: one row per officer (the fewest pages first: what to annotate), its label in W&B and the
+  figures (`W-1a2b3c`), its pages, acts, page 1 / page 2, acts missing a page, splits. Spellings that look like the
+  same officer are listed: merge them ("This spelling … is the same officer as …"), then split again.
+  `python -m mlops.cli writers` prints the same table.
+- **Batches**: **Delete** takes the pages of a batch out of the dataset at once (files and rows kept: the dataset
+  versions and models made with them stay traceable; **Restore** brings them back, as does uploading the same
+  pages again). **Purge** (type `PURGE <batch>`) removes a deleted batch for good, only if no model or evaluation
+  used a dataset version holding its pages.
+- **Missing pages**: the acts with only one page annotated, per register; the list of the file names to annotate
+  is a download (it never goes to a job log).
+- **Normalisation**: Preview counts what `ingest.normalize` would change; Normalize runs it as a job (backup of the
+  old files in `data/backup/`).
+- **Preview of the dataset as line images**: every line cut along its polygon, shuffled across the pages of its
+  split, renamed by split, with its transcription and no metadata (zip entries with a fixed date). It is **not
+  anonymised** (names, dates, handwriting): only the admins (`MLOPS_ADMINS` in `.env`, else the first login of
+  `MLOPS_AUTH`) can download it, and every download is recorded (table `downloads`).
+
+### Experiments: cross-validation by writer, other recognizers, full pipeline
+
+**Experiments** trains a recognizer on writers it never saw: one fold per writer (writers with fewer than
+`crossval.min_writer_pages` pages together; at most `crossval.max_folds` folds), the validation pages taken from
+the training writers, every page tested once; or on the dataset's own split. Kraken (the HTR options of the Train
+tab; optionally the segmentation trained per fold too, for the end-to-end score on page 2), a CRNN, a TrOCR-style
+model or Qwen2.5-VL-3B (LoRA), on the same folds and line images, scored by the same code. Several seeds give the
+mean and standard deviation. The result (numbers with intervals by writer, names, per writer, per fold) and its
+figures are in the table and downloadable; every fold's curves are in W&B (one group per experiment). The other
+recognizers run in `mlops-baselines`; their weights are downloaded once into the `hf-cache` volume (TrOCR:
+`microsoft/trocr-base-stage1`, Qwen: `Qwen/Qwen2.5-VL-3B-Instruct`; check its licence before any use other than
+research).
+
+**Evaluate → Full pipeline**: a segmentation model and a recognition model (production or any trained one)
+together on the page-2 test pages: CER on the true lines, end-to-end CER (what the segmentation adds), line
+detection precision / recall, names.
+
+**Figures**: every training, evaluation and experiment has its figures (PNG and PDF, made with matplotlib from the
+same numbers as W&B): validation curves on the full range with the selected checkpoint, CER per script per epoch
+(Train option "detailed validation curves"), time per epoch and GPU memory; the charts W&B always had; error
+composition, end-to-end breakdown, names per field and page, letter-shape confusions, form row x model and writer
+x model heatmaps. W&B only receives numbers (tables), characters and anonymous writer labels.
 
 ### 8. The first cycle
 
@@ -347,7 +392,8 @@ in `.env`, then `docker compose up -d`.
 
 | Section | What it sets |
 |---|---|
-| `ingest` | the checks of a page, the group pattern of the split, the split fractions, the upload size limit |
+| `ingest` | the checks of a page, the unit of the split (`split_by`: writer or group), the group pattern, the split fractions, the upload size limit |
+| `crossval` | the folds of a cross-validation by writer (pages of a writer alone in its fold, maximum folds, validation share) |
 | `augment` | augmentation on or off, copies per page, seed |
 | `blla`, `htr` | the ketos options (epochs, batch size, lag, resize, workers, precision, compile, extra arguments) |
 | `jobs` | how long the log lines of a finished job are kept (`log_retention_days`) |
@@ -372,21 +418,35 @@ MLOPS_TEST_DATABASE_URL=postgresql://mlops:test@127.0.0.1:5433/mlops_test python
 
 GitHub Actions runs them on every push (`.github/workflows/tests.yml`, with a PostgreSQL service). They cover the
 checks and the pseudonymisation of the ingestion, the split by group (balanced on the characters, every character in every split when possible, never an empty split), the dataset versions, the job queue and its
-cancellation, the gate and the whole flow (upload → ingest → train → evaluate → pull request) with the worker.
+cancellation (one job on the GPU at a time across the two workers), the gate and the whole flow (upload → ingest →
+train → evaluate → pull request) with the worker; the writers (extraction, aliases, writer-independent split,
+held-out set), the names and form rows, the two CERs and their intervals by writer, the deletion of batches, the
+preview zip, the figures, the cross-validation by writer and the full pipeline (fake kraken), and the CRNN (with
+PyTorch).
 
 ## Files
 
 ```
 madoc-mlops/
-├── docker-compose.yml        db, mlops-ui, mlops-worker
+├── docker-compose.yml        db, mlops-ui, mlops-worker, mlops-baselines
 ├── Dockerfile                the image of mlops-ui and mlops-worker (PyTorch CUDA 12.8, kraken 7.0.2)
+├── Dockerfile.baselines      + transformers, peft, accelerate (the other recognizers)
 ├── params.yaml               the settings
 ├── .env.example              the secrets to fill in .env
 ├── mlops/
 │   ├── ui.py                 the control app
 │   ├── worker.py             the job loop, heartbeat, cancellation
 │   ├── jobs.py               the queue (PostgreSQL, SKIP LOCKED) and the job logs
-│   ├── ingest.py             checks, pseudonymisation, split by group
+│   ├── ingest.py             checks, pseudonymisation, placement by writer (or group), held-out set
+│   ├── writers.py            the officer of each act, aliases, the writer table
+│   ├── fields.py             what the form says: writer, child's names, form rows (from the transcription)
+│   ├── batches.py            deleting, restoring, purging a batch
+│   ├── preview.py            the shuffled line images (zip, admins only)
+│   ├── recognize.py          kraken on the test pages, one row per line (true lines, or end to end)
+│   ├── scoring.py            every number of an evaluation and its interval by writer
+│   ├── charts.py             the figures (matplotlib, PNG / PDF)
+│   ├── crossval.py           experiments: cross-validation by writer, the dataset's split, full pipeline
+│   ├── baselines/            CRNN, TrOCR-style, Qwen2.5-VL (LoRA), line images
 │   ├── missing.py            the acts with only one of their two pages annotated
 │   ├── settings.py           the options chosen in the app (training, split), on top of params.yaml
 │   ├── normalize.py          the replacement of invisible / look-alike characters
@@ -399,7 +459,7 @@ madoc-mlops/
 │   ├── evaluate.py           evaluation job, per-page metrics, the gate
 │   ├── eval_charts.py        the W&B charts of an evaluation (candidate and production side by side)
 │   ├── release.py            the production models (MaDoc clone) and the pull request
-│   ├── textmetrics.py        CER, words found, bootstrap
+│   ├── textmetrics.py        CER (with / without spaces and punctuation), error composition, bootstrap
 │   ├── kraken_output.py      reading the output of ketos
 │   ├── pagexml.py            reading PageXML
 │   ├── resources.py          GPU / CPU / memory / disk, unloading Gemma

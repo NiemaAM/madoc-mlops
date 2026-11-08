@@ -375,9 +375,13 @@ def test_ingest_and_cli_normalize(env):
         # a page already in the dataset with a no-break space (ingested before the setting existed)
         stored.write_text(stored.read_text(encoding="utf-8").replace("عام", "عام\u00a0x"), encoding="utf-8")
         (env / "data" / "augmented" / "old").mkdir(parents=True)
-        assert normalize_dataset(conn, log=lambda *_: None) == {"U+00A0": 1}
+        assert normalize_dataset(conn, log=lambda *_: None, apply=False)["replaced"] == {"U+00A0": 1}
+        assert "\u00a0" in stored.read_text(encoding="utf-8")                        # a preview changes nothing
+        result = normalize_dataset(conn, log=lambda *_: None)
+        assert result["replaced"] == {"U+00A0": 1} and result["pages"] == 1
         assert "\u00a0" not in stored.read_text(encoding="utf-8") and not (env / "data" / "augmented").exists()
-        assert normalize_dataset(conn, log=lambda *_: None) == {}
+        assert "\u00a0" in (Path(result["backup"]) / stored.name).read_text(encoding="utf-8")   # the old file kept
+        assert normalize_dataset(conn, log=lambda *_: None)["replaced"] == {}
 
 
 def test_dataset_versions(env):
@@ -426,10 +430,22 @@ def test_job_queue(env):
     with db.connection() as a, db.connection() as b:
         first = jobs.enqueue(a, "train", "htr")
         second = jobs.enqueue(a, "train", "blla")
+        other = jobs.enqueue(a, "crossval", None, recognizer="crnn")       # the baselines container's job
+        assert other["queue"] == "baselines" and first["queue"] == "kraken"
         with a.transaction():   # a holds the first job: b takes the next one (SKIP LOCKED)
             db.one(a, "SELECT * FROM jobs WHERE id = %s FOR UPDATE", first["id"])
             assert jobs.claim(b)["id"] == second["id"]
+        # one job on the GPU at a time: nothing is taken while one runs, by either worker
+        assert jobs.claim(a) is None and jobs.claim(a, ("baselines",)) is None
+        jobs.finish(a, second["id"], "done")
         assert jobs.claim(a)["id"] == first["id"] and jobs.claim(a) is None
+        jobs.finish(a, first["id"], "done")
+        assert jobs.claim(a) is None                                            # only a baselines job is left
+        assert jobs.claim(b, ("baselines",))["id"] == other["id"]
+        jobs.recover(a, ("kraken",))                                            # the other queue's job goes on
+        assert db.one(a, "SELECT status FROM jobs WHERE id = %s", other["id"])["status"] == "running"
+        jobs.finish(a, other["id"], "done")
+        a.execute("UPDATE jobs SET status = 'running', finished_at = NULL WHERE id = %s", (first["id"],))
         third = jobs.enqueue(a, "evaluate", "htr", model_id=1)
         jobs.cancel(a, third["id"])
         assert db.one(a, "SELECT status FROM jobs WHERE id = %s", third["id"])["status"] == "cancelled"
@@ -518,6 +534,15 @@ def test_whole_flow_with_the_worker(env, madoc_remote, monkeypatch):
         # one W&B run per model, in one group per evaluation
         assert evaluations[1]["comparison"]["wandb"]["group"].startswith("blla-eval-job")
         assert evaluations[0]["comparison"]["groups"] >= 1 and "group_gains" in evaluations[0]["comparison"]
+        # every number with its interval, the figures of the evaluation and of the trainings
+        assert {"cer", "cer_low", "cer_high", "cer_lp", "wer"} <= set(evaluations[0]["candidate"])
+        assert evaluations[0]["production"]["cer"] > evaluations[0]["candidate"]["cer"]
+        assert {"line_precision", "line_recall", "mean_e2e_word_f1"} <= set(evaluations[1]["candidate"])
+        made = {p.stem for p in Path(evaluations[0]["figures"]).glob("*.png")}
+        assert {"candidate_accuracy_comparison", "production_error_types", "error_composition", "form_rows",
+                "writers"} <= made
+        assert "e2e_breakdown" in {p.stem for p in Path(evaluations[1]["figures"]).glob("*.png")}
+        assert all("training_curves" in {p.stem for p in Path(m["figures"]).glob("*.png")} for m in models)
         # the same production model on the same test pages: its numbers are reused, not computed again
         jobs.enqueue(conn, "evaluate", "htr", model_id=models[0]["id"])
         worker.main(once=True)
@@ -671,12 +696,28 @@ def test_the_commands_of_the_deployment(env, capsys):
         cli.main(["import", str(env / "missing")])
 
 
-def test_the_app_builds(env):
+def test_the_app_builds(env, monkeypatch):
     pytest.importorskip("gradio")
-    from mlops import ui
+    import gradio as gr
+    from mlops import db, ui
     assert ui.build_app() is not None
     assert [row[0] for row in ui.dataset_table()] == ["train", "val", "test"]
     assert "CPU" in ui.server_html()
+    with db.connection() as conn:
+        ingest_texts(conn, env, "ui", [p for w in range(3) for p in act_pages(w, 1, f"كاتب {'ابت'[w]}", (w * 60, 5, 5))])
+    rows, warning, *_ = ui.writers_view()
+    assert len(rows) == 3 and all(r[1].startswith("W-") for r in rows)
+    assert "Rules" in ui.normalize_preview() and "pages would change" in ui.normalize_preview()
+    # the preview zip: admins only (MLOPS_ADMINS, else the first login)
+    monkeypatch.setenv("MLOPS_AUTH", "boss:x,guest:y")
+    request = type("Request", (), {"username": "guest"})()
+    with pytest.raises(gr.Error, match="admin"):
+        ui.on_preview_download(request)
+    request.username = "boss"
+    with pytest.raises(gr.Error, match="Make the preview"):
+        ui.on_preview_download(request)
+    assert ui.experiments_table() == [] and ui.experiment_details(None)[0] == "Choose an experiment."
+    assert ui.figures_of(None) == ([], [])
 
 
 def test_vocabulary(env):
@@ -773,3 +814,301 @@ def test_the_logger_writes_numbers_but_no_images_or_texts(tmp_path):
     accumulator = EventAccumulator(str(events[0]))
     accumulator.Reload()
     assert accumulator.Scalars("val_accuracy")[0].value == pytest.approx(0.9)
+
+# --- writers, names, scores, figures, experiments ------------------------------------------------------------
+PAGE1 = ["الصفحة رقم : 1", "PRENOM ANWAR. ....... الاسم الشخصي : أنور", "NOM EZ-ZAYANY ...... الاسم العائلي : الزياني",
+         "FILS DE : ABDELLAH. والده :", "ET DE : NADIA EZAHIRI fille de MOHAMMED والدته :",
+         "اختير اسم الأب طبقا لمقتضيات المادة 16"]
+
+
+def page2(writer, name="مها", latin="MAHA"):
+    return ["رسم ولادة رقم: 18", "في يوم : رابع ذو القعدة", f"الاسم الشخصي : {name}", f"PRENOM {latin}",
+            f"من طرفنا نحن {writer} موظف جماعي", "وبعد تلاوة الرسم على المصرح"]
+
+
+def act_pages(register, act, writer, color, with_page1=True):
+    """The two pages of an act ("..._<act>-1-1" names, "..._<act>-2-1" details), page 2 naming its writer."""
+    out = [(f"03010108_1_{register}_I_2016_{act}-2-1", color, page2(writer))]
+    if with_page1:
+        out.append((f"03010108_1_{register}_I_2016_{act}-1-1", tuple(min(255, c + 7) for c in color), PAGE1))
+    return out
+
+
+def ingest_texts(conn, tmp, name, pages, held_out=False):
+    from mlops import db
+    from mlops.ingest import ingest
+    folder = tmp / f"src-{name}"
+    for stem, color, texts in pages:
+        make_page(folder, stem, color, lines=len(texts), texts=texts)
+    batch = db.one(conn, "INSERT INTO batches (held_out) VALUES (%s) RETURNING id", held_out)
+    return batch["id"], ingest(conn, batch["id"], make_zip(folder, tmp / f"{name}.zip"), log=lambda *_: None)
+
+
+def test_names_writers_and_form_rows():
+    from mlops import fields
+    spans = fields.name_spans(PAGE1)
+    got = {f: PAGE1[i][a:b] for f, (i, a, b) in spans.items()}
+    assert got == {"latin_first": "ANWAR", "arabic_first": "أنور", "latin_family": "EZ-ZAYANY",
+                   "arabic_family": "الزياني"}                       # FILS DE / ET DE / the note are never names
+    assert fields.name_spans(["الاسم الشخصي : ......"]) == {"arabic_first": (0, None, None)}   # label, no name
+    assert fields.writer_name(page2("لحسن اشميطي")) == "لحسن اشميطي"
+    assert fields.close_names(fields.writer_key_text("لحسن شميطي"), fields.writer_key_text("لحسن اشميطي"))
+    assert not fields.close_names("لحسن شميطي", "عبد الرحيم كلفاع")
+    assert fields.form_rows(PAGE1, "1")[-1] == "Marginal notes" and fields.form_rows(page2("x"), "2")[4] == "Officer"
+    # the name read in the prediction is the part aligned with the true name: a misread label does not count
+    assert fields.carry_span("PRENOM ANWAR", "PRFNOM ANWAR", 7, 12) == "ANWAR"
+    assert fields.name_key("latin_first", "M.A.H.A") == "MAHA" and fields.name_key("arabic_family", "الزِّياني") == "الزياني"
+
+
+def test_two_cers_composition_names_and_intervals():
+    from mlops.scoring import flat_metrics, score
+    from mlops.textmetrics import line_errors, ratio_interval
+    e = line_errors("رسم ولادة: 18", "رسم ولاده 18 x")
+    assert e["errors"] == 4 and e["errors_lp"] == 2                       # without spaces and punctuation: 2
+    assert e["composition"]["deletions"]["punctuation"] == 1 and e["composition"]["insertions"]["spaces"] == 1
+    assert ratio_interval({}) == (None, None, None)
+    pages = {"a": {"writer": "W-1", "page_type": "1", "lines": PAGE1},
+             "b": {"writer": "W-2", "page_type": "2", "lines": page2("لحسن شميطي")},
+             "c": {"writer": "W-3", "page_type": "2", "lines": page2("عبد الرحيم")}}
+    rows = []
+    for pid, meta in pages.items():
+        for i, text in enumerate(meta["lines"]):
+            pred = text.replace("ANWAR", "ANWAP") if pid == "a" else text.replace("مها", "مهآ") if pid == "b" else text
+            rows.append({"page": pid, "line": i, "ref": text, "pred": pred})
+    rows.append({"page": "c", "line": None, "ref": "", "pred": "xx"})        # a line found that is not there
+    summary = score(rows, pages)
+    assert summary["interval"] == "by writer" and summary["writers_count"] == 3
+    assert summary["metrics"]["cer"] > 0 and summary["metrics"]["cer_lp"] > 0
+    low, high = summary["ci"]["cer"]
+    assert low <= summary["metrics"]["cer"] <= high
+    names = summary["names"]
+    assert names["latin_first|1"]["exact"] == 0.0 and names["latin_family|1"]["exact"] == 100.0
+    assert names["arabic_first|2"]["names"] == 2 and names["arabic_first|2"]["exact"] == 50.0
+    assert names["arabic_first|2"]["normalized"] == 100.0                  # آ = ا: the same name normalised
+    assert "Officer|2" in summary["form_rows"] and set(summary["writers"]) == {"W-1", "W-2", "W-3"}
+    flat = flat_metrics(summary)
+    assert {"cer", "cer_low", "cer_high", "cer_lp", "names_exact"} <= set(flat)
+
+
+def test_writer_independent_split_held_out_and_aliases(env):
+    from mlops import db, writers
+    from mlops.ingest import resplit
+    names = ["لحسن شميطي", "عبد الرحيم كلفاع", "محمد العلوي", "سعيد بنعلي", "رشيد الإدريسي", "كريم الفاسي"]
+    with db.connection() as conn:
+        pages = []
+        for w, writer in enumerate(names):
+            for act in range(6 + w):
+                pages += act_pages(w, act, writer, (w * 40, act * 12, 50))
+        pages += act_pages(9, 1, "لحسن اشميطي", (250, 250, 1))             # another spelling of the first writer
+        pages += [("03010108_1_8_I_2016_1-1-1", (1, 250, 250), PAGE1)]        # a page 1 whose page 2 is not there
+        _, report = ingest_texts(conn, env, "w", pages)
+        assert sum(report["added"].values()) == len(pages)
+        rows = db.all_rows(conn, "SELECT p.*, o.original_name FROM pages p JOIN page_origins o ON o.page_id = p.id")
+        by_writer, by_act = {}, {}
+        for r in rows:
+            by_act.setdefault(r["act_key"], set()).add(r["split"])
+            if r["writer_key"]:
+                by_writer.setdefault(r["writer_key"], set()).add(r["split"])
+        assert all(len(s) == 1 for s in by_writer.values())                  # no writer in two splits
+        assert all(len(s) == 1 for s in by_act.values())                     # both pages of an act together
+        assert {s for v in by_writer.values() for s in v} == {"train", "val", "test"}
+        orphan = next(r for r in rows if "_8_I_" in r["original_name"])
+        assert orphan["writer_key"] is None and orphan["split"] == "train"   # unknown writer: train only
+        assert len(by_writer) == 7 and writers.variants(conn)                 # the two spellings are flagged
+        writers.add_alias(conn, "لحسن اشميطي", "لحسن شميطي")
+        assert not writers.variants(conn)
+        table = writers.table(conn)
+        first = next(t for t in table if t["writer"] == writers.writer_key_text("لحسن شميطي"))
+        assert first["pages"] == 2 * 6 + 2 and first["label"].startswith("W-")
+        with pytest.raises(ValueError, match="loop"):
+            writers.add_alias(conn, "لحسن شميطي", "لحسن اشميطي")
+        result = resplit(conn, log=lambda *_: None)
+        rows = db.all_rows(conn, "SELECT writer_key, split FROM pages WHERE writer_key IS NOT NULL")
+        assert len({r["writer_key"] for r in rows}) == 6 and "writers placed again" in result["text"]
+        assert all(len({r["split"] for r in rows if r["writer_key"] == w}) == 1 for w in {r["writer_key"] for r in rows})
+        # a held-out batch: in test for good, through a new split, and reported when it shares a writer
+        _, report = ingest_texts(conn, env, "held", act_pages(7, 1, "لحسن شميطي", (3, 3, 3)), held_out=True)
+        assert report["held_out"] and report["added"]["test"] == 2
+        result = resplit(conn, log=lambda *_: None)
+        held = db.all_rows(conn, "SELECT split, pinned_split FROM pages WHERE held_out")
+        assert {(r["split"], r["pinned_split"]) for r in held} == {("test", "test")}
+        if db.one(conn, "SELECT split FROM pages WHERE writer_key = (SELECT writer_key FROM pages WHERE held_out "
+                        "LIMIT 1) AND NOT held_out LIMIT 1")["split"] != "test":
+            assert result["held_out_overlap"] > 0 and "held-out set" in result["text"]
+        # the writer of the page in the browse tab, only when the original names are shown
+        from mlops import browse
+        options, _ = browse.choices(conn, "test", "all", show_names=True, search="03010108_1_7_I")
+        assert len(options) == 2 and all("03010108_1_7_I" in label and "held out" in label for label, _ in options)
+        hidden, _ = browse.choices(conn, "test", "all")
+        assert all("03010108" not in label for label, _ in hidden)
+        _, _, _, info = browse.show(options[0][1], True, True)
+        assert "original name" in info and "writer" in info
+
+
+def test_delete_restore_and_purge_a_batch(env):
+    from mlops import batches, datasets, db
+    with db.connection() as conn:
+        first, _ = ingest_texts(conn, env, "a", [(f"X_2010_{i}-1", (i * 30, 1, 1), page2("أ ب")) for i in range(4)])
+        second, _ = ingest_texts(conn, env, "b", [(f"Y_2011_{i}-1", (i * 30, 99, 1), page2("ج د")) for i in range(3)])
+        assert batches.delete(conn, second) == 3
+        version = datasets.snapshot(conn)
+        assert sum(version["counts"].values()) == 4                          # the deleted pages are out
+        with pytest.raises(ValueError, match="already deleted"):
+            batches.delete(conn, second)
+        assert batches.restore(conn, second) == 3
+        assert sum(datasets.snapshot(conn)["counts"].values()) == 7
+        batches.delete(conn, second)
+        with pytest.raises(ValueError, match="PURGE"):
+            batches.purge(conn, second, "yes")
+        # a model trained on a version holding these pages: they stay (traceable)
+        used = datasets.snapshot(conn)
+        db.one(conn, "SELECT 1 AS x FROM dataset_versions")
+        conn.execute("UPDATE pages SET deleted_at = NULL WHERE batch_id = %s", (second,))
+        with_them = datasets.snapshot(conn)
+        conn.execute("UPDATE pages SET deleted_at = now() WHERE batch_id = %s", (second,))
+        conn.execute("INSERT INTO models (task, path, dataset_version_id) VALUES ('htr', 'x', %s)", (with_them["id"],))
+        with pytest.raises(ValueError, match="traceable"):
+            batches.purge(conn, second, f"PURGE {second}")
+        conn.execute("DELETE FROM models")
+        files = list((env / "data" / "pages").iterdir())
+        assert batches.purge(conn, second, f"PURGE {second}") == 3
+        assert len(list((env / "data" / "pages").iterdir())) == len(files) - 6     # XML + image of 3 pages
+        assert db.one(conn, "SELECT status FROM batches WHERE id = %s", second)["status"] == "purged"
+        assert db.one(conn, "SELECT count(*) AS n FROM pages")["n"] == 4 and used
+        # the same pages uploaded again after a delete come back (restored), not as duplicates
+        batches.delete(conn, first)
+        _, report = ingest_texts(conn, env, "a", [(f"X_2010_{i}-1", (i * 30, 1, 1), page2("أ ب")) for i in range(4)])
+        assert report["restored"] == 4 and report["duplicates"] == 0
+
+
+def test_missing_pages_panel_spaces_and_preview(env):
+    import zipfile
+    from mlops import db, missing, preview, vocabulary
+    with db.connection() as conn:
+        ingest_texts(conn, env, "m", act_pages(1, 1, "أ ب", (10, 10, 10)) + act_pages(1, 2, "أ ب", (90, 9, 9), False))
+        rows = missing.summary_rows(conn)
+        assert rows[-1] == ["total", "", 1, 1, 0] and "03010108_1_1_I_2016_2-1-1" in missing.listing(conn)
+        page = vocabulary.vocabulary_html({"train": __import__("collections").Counter({" ": 8, " ": 1, "a": 3}),
+                                           "val": __import__("collections").Counter(), "test": __import__("collections").Counter()})
+        assert "Spaces and invisible characters" in page and "No-Break Space" in page and "U+00A0" in page
+        result = preview.build(conn, log=lambda *_: None)
+        file = preview.latest()
+        assert file.name == result["file"] and sum(result["lines"].values()) == 3 * 6
+        with zipfile.ZipFile(file) as archive:
+            names = archive.namelist()
+            assert "README.txt" in names and not any("03010108" in n for n in names)
+            for split, n in result["lines"].items():
+                if n:
+                    labels = archive.read(f"{split}/labels.tsv").decode("utf-8").splitlines()
+                    assert len(labels) == n and all(line.split("\t")[0].startswith(f"{split}_") for line in labels)
+            dates = {i.date_time for i in archive.infolist() if i.filename.endswith(".png")}
+            assert dates == {(2000, 1, 1, 0, 0, 0)}                           # no time to put the pages back
+        preview.record_download(conn, "admin", file.name)
+        assert db.one(conn, "SELECT username FROM downloads")["username"] == "admin"
+
+
+def test_figures():
+    from mlops import charts
+    epochs = [{"epoch": e, "val_accuracy": 0.9 + e / 100, "val_word_accuracy": 0.7 + e / 50, "train_loss": 5 - e,
+               "val_cer": 10 - e, "seconds": 60.0, "val_cer_script_Arabic": 8 - e} for e in range(1, 5)]
+    assert charts.epochs_of({10: {"epoch": 0, "val_accuracy": 0.5}, 20: {"epoch": 1, "val_accuracy": 0.6}}) == [
+        {"epoch": 1, "val_accuracy": 0.5}, {"epoch": 2, "val_accuracy": 0.6}]
+    import tempfile
+    folder = Path(tempfile.mkdtemp())
+    for name, fig in {"curves": charts.training_curves([{"label": "a", "epochs": epochs}], "htr"),
+                      "folds": charts.training_curves([{"label": "a", "epochs": epochs},
+                                                       {"label": "b", "epochs": epochs}], "htr"),
+                      "scripts": charts.script_curves(epochs), "cost": charts.cost(epochs, 9000),
+                      "confusions": charts.confusion_heatmap({("ب", "ت"): 5, ("ت", "ث"): 2, (" ", ""): 9, ("", "ا"): 1}),
+                      "e2e": charts.e2e_breakdown({"m": {"gt_cer": 2.0, "e2e_cer": 3.5, "precision": 0.97, "recall": 0.95}}),
+                      "heat": charts.heatmap("t", ["r1", "r2"], ["m"], {("r1", "m"): 1.0})}.items():
+        charts.save(fig, folder, name)
+        charts.caption(folder, name, name.upper())
+    assert {p.name for p in folder.glob("*.pdf")} == {f"{n}.pdf" for n in
+                                                      ("curves", "folds", "scripts", "cost", "confusions", "e2e", "heat")}
+    assert dict((Path(p).stem, c) for p, c in charts.gallery(folder))["e2e"] == "E2E"
+
+
+def test_crossval_by_writer_and_the_full_pipeline(env, madoc_remote, monkeypatch):
+    """Kraken trained per writer fold (fake ketos), the folds' test pages read (fake kraken), names and CER pooled
+    with intervals by writer, figures made; then a segmentation + recognition pair on the page-2 test pages."""
+    from mlops import crossval, db, jobs, worker
+    for module in ("mlops.crossval", "mlops.train", "mlops.evaluate"):
+        monkeypatch.setattr(f"{module}.free_gpu", lambda log=print: None, raising=False)
+    monkeypatch.setattr("mlops.train.ketos_program", lambda: ["ketos"])     # the fake ketos, whatever is imported
+    names = ["لحسن شميطي", "عبد الرحيم كلفاع", "محمد العلوي", "سعيد بنعلي"]
+    with db.connection() as conn:
+        pages = [p for w, writer in enumerate(names) for act in range(4) for p in
+                 act_pages(w, act, writer, (w * 50, act * 30, 7))]
+        ingest_texts(conn, env, "cv", pages)
+        assert [len(f) for f in crossval.make_folds([{"writer_key": "a"}] * 6 + [{"writer_key": "b"}] * 2 +
+                                                    [{"writer_key": "c"}] * 2, max_folds=10, min_pages=5)] == [1, 2]
+        jobs.enqueue(conn, "crossval", None, recognizer="kraken", scheme="writers", seeds=[1, 2], segmentation=True)
+        jobs.enqueue(conn, "pipeline", None, segmentation="production", recognition="production")
+        worker.main(once=True)
+        done = db.all_rows(conn, "SELECT kind, status, error FROM jobs ORDER BY id")
+        assert [j["status"] for j in done] == ["done", "done"], done
+        cv, pipe = db.all_rows(conn, "SELECT * FROM experiments ORDER BY id")
+        s = cv["summary"]
+        assert len(s["folds"]) == 4 and s["writers_count"] == 4 and s["interval"] == "by writer"
+        assert sum(f["test"] for f in s["folds"]) == len(pages)              # every page tested once
+        assert all(not set(f["writers"]) & set(g["writers"]) for f in s["folds"] for g in s["folds"] if f is not g)
+        assert s["metrics"]["cer"] == 0.0 and s["names"]["all"]["exact"] == 100.0   # the fake candidate reads all
+        assert set(s["spread"]) >= {"cer"} and s["spread"]["cer"]["sd"] == 0.0       # two seeds
+        assert s["pipeline"]["e2e_cer"] is not None and s["pipeline"]["recall"] == 1.0
+        figures = {p.stem for p in Path(cv["figures"]).glob("*.png")}
+        assert {"training_curves", "error_composition", "names_cer", "form_rows", "writers", "e2e_breakdown",
+                "writers_cer"} <= figures
+        # the production pair loses the last line and word of every line: errors, missed lines
+        p = pipe["summary"]
+        assert p["metrics"]["cer"] > 0 and p["detection"]["recall"] < 1 and p["true_lines"]["metrics"]["cer"] > 0
+        assert "e2e_breakdown" in {f.stem for f in Path(pipe["figures"]).glob("*.png")}
+        # no name of a writer, no file name in the logs
+        logs = " ".join(r["line"] for r in db.all_rows(conn, "SELECT line FROM job_logs"))
+        assert "شميطي" not in logs and "03010108" not in logs
+
+
+def test_crnn_learns_on_its_own_lines(tmp_path):
+    """The CRNN of the baselines container on line images (no kraken needed here): it trains, early-stops and
+    gives back one row per test line."""
+    torch = pytest.importorskip("torch")
+    from PIL import Image, ImageDraw
+    from mlops.baselines import crnn
+    lines = []
+    for n, text in enumerate(["ab", "ba", "aab", "bba"] * 3):
+        image = Image.new("L", (24 * len(text), 32), 255)
+        draw = ImageDraw.Draw(image)
+        for k, char in enumerate(text):
+            draw.rectangle([24 * k + 4, 6, 24 * k + (18 if char == "a" else 10), 26], fill=0)
+        image.save(tmp_path / f"{n}.png")
+        lines.append({"page": f"p{n % 3}", "line": n, "image": str(tmp_path / f"{n}.png"), "text": text,
+                      "display": text})
+    torch.set_num_threads(1)
+    result = crnn.train_and_read({"train": lines, "val": lines[:4], "test": lines[:4]},
+                                 {"epochs": 3, "lag": 2, "batch_size": 4, "device": "cpu"}, 1, tmp_path / "out",
+                                 lambda *_: None, lambda: False)
+    assert len(result["rows"]) == 4 and {"page", "line", "ref", "pred"} <= set(result["rows"][0])
+    assert [e["epoch"] for e in result["epochs"]] == [1, 2, 3] and "val_cer" in result["epochs"][0]
+
+
+def test_detailed_validation_curves(env):
+    """Every epoch's checkpoint (fake ketos convert, fake kraken) reads the validation lines: CER with and without
+    spaces and punctuation and per script, added to the epochs."""
+    import wandb
+    from mlops import datasets, db
+    from mlops.train import detailed_curves
+    with db.connection() as conn:
+        ingest_texts(conn, env, "d", [p for w in range(3) for p in act_pages(w, 1, f"كاتب {'ابت'[w]}", (w * 70, 3, 3))])
+        rows = datasets.pages(conn, datasets.snapshot(conn)["id"], "train")
+    folder = env / "runs" / "htr" / "job-1"
+    (folder / "checkpoints").mkdir(parents=True)
+    for epoch in range(2):
+        (folder / "checkpoints" / f"checkpoint_{epoch:02d}-0.9{epoch}.ckpt").write_text("w")
+    wandb.init(project="t", mode="offline")
+    try:
+        epochs = detailed_curves([{"epoch": 1}, {"epoch": 2}], folder / "checkpoints", rows, folder,
+                                 lambda *_: None, lambda: False)
+    finally:
+        wandb.finish()
+    assert all({"val_cer", "val_cer_lp", "val_cer_script_Arabic"} <= set(e) for e in epochs)
+    assert not list((folder / "detail").glob("*.mlmodel"))                # the converted epochs are removed

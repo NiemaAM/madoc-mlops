@@ -18,6 +18,7 @@ class TensorBoardBridge:
         self.log_dir, self.interval, self.log = Path(log_dir), interval, log
         self.sent = {}            # tag -> last step sent
         self.latest = {}          # tag -> last value (the summary of the training)
+        self.history = {}         # step -> {tag: value, "wall_time": seconds} (the curves of the figures)
         self.stop_event = threading.Event()
         self.thread = None
 
@@ -56,6 +57,9 @@ class TensorBoardBridge:
                 for event in accumulator.Scalars(tag):
                     if event.step > self.sent.get(tag, -1):
                         rows.setdefault(event.step, {})[tag] = event.value
+                        entry = self.history.setdefault(event.step, {})
+                        entry[tag] = event.value
+                        entry["wall_time"] = max(entry.get("wall_time", 0.0), event.wall_time)
         count = 0
         for step in sorted(rows):
             values = rows[step]

@@ -12,7 +12,7 @@ from mlops.config import SPLITS, path
 
 def snapshot(conn):
     """The version holding every page of the dataset now (made if it does not exist yet) -> its row."""
-    rows = db.all_rows(conn, "SELECT id, split FROM pages ORDER BY id")
+    rows = db.all_rows(conn, "SELECT id, split FROM pages WHERE deleted_at IS NULL ORDER BY id")
     digest = hashlib.sha256("\n".join(f'{r["id"]}:{r["split"]}' for r in rows).encode()).hexdigest()[:16]
     existing = db.one(conn, "SELECT * FROM dataset_versions WHERE digest = %s", digest)
     if existing:
@@ -45,12 +45,17 @@ def seen_page_ids(conn, version_id):
         conn, "SELECT page_id FROM dataset_pages WHERE version_id = %s AND split IN ('train', 'val')", version_id)}
 
 
-def leaking_groups(conn, version_id):
-    """The groups of a version found in more than one split (a split by page, imported with --split and not
-    split again): a page of such a group in test has near-copies in train."""
-    return db.all_rows(conn, "SELECT p.group_key, count(DISTINCT d.split) AS splits, count(*) AS pages "
+def leaking_groups(conn, version_id, unit="group_key"):
+    """The groups (unit "group_key") or writers (unit "writer_key") of a version found in more than one split (a
+    split by page, imported with --split, or split by another unit and not split again): a page of such a unit
+    in test has near-copies, or the same hand, in train. Pinned pages (held out, imported with a split) and
+    pages without a known writer are left out."""
+    if unit not in ("group_key", "writer_key"):
+        raise ValueError(unit)
+    return db.all_rows(conn, f"SELECT p.{unit} AS unit, count(DISTINCT d.split) AS splits, count(*) AS pages "
                              "FROM dataset_pages d JOIN pages p ON p.id = d.page_id WHERE d.version_id = %s "
-                             "GROUP BY p.group_key HAVING count(DISTINCT d.split) > 1", version_id)
+                             f"AND p.pinned_split IS NULL AND p.{unit} IS NOT NULL "
+                             f"GROUP BY p.{unit} HAVING count(DISTINCT d.split) > 1", version_id)
 
 
 def xml_paths(rows):

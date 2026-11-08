@@ -2,26 +2,41 @@
 
 A job is taken with SELECT ... FOR UPDATE SKIP LOCKED, so two workers could never take the same one. Its output
 goes to job_logs line by line (the app shows it live), its result and error to the job's row.
+
+Two workers share the GPU: "kraken" (the main one) and "baselines" (CRNN, TrOCR, Qwen: their own container, with
+their own libraries). Each takes the jobs of its queue, and only when no job at all is running: one job on the
+GPU at a time (the claim is serialised by a transaction lock).
 """
 
 import time
 
 from mlops import db
 
-KINDS = ("ingest", "augment", "train", "evaluate", "release")
+KINDS = ("ingest", "augment", "train", "evaluate", "release", "crossval", "pipeline", "normalize", "preview")
+QUEUES = ("kraken", "baselines")
+CLAIM_LOCK = 7_310_001     # pg_advisory_xact_lock key: one claim at a time, across the workers
+
+
+def queue_of(kind, args):
+    """The worker of a job: the other recognizers run in the baselines container."""
+    return "baselines" if kind == "crossval" and args.get("recognizer", "kraken") != "kraken" else "kraken"
 
 
 def enqueue(conn, kind, task=None, **args):
     if kind not in KINDS:
         raise ValueError(f"unknown job kind {kind}")
-    return db.one(conn, "INSERT INTO jobs (kind, task, args) VALUES (%s, %s, %s) RETURNING *",
-                  kind, task, db.json(args))
+    return db.one(conn, "INSERT INTO jobs (kind, task, args, queue) VALUES (%s, %s, %s, %s) RETURNING *",
+                  kind, task, db.json(args), queue_of(kind, args))
 
 
-def claim(conn):
-    """The oldest queued job, now running -> its row, or None."""
+def claim(conn, queues=("kraken",)):
+    """The oldest queued job of these queues, now running -> its row, or None (also while any job runs)."""
     with conn.transaction():
-        job = db.one(conn, "SELECT * FROM jobs WHERE status = 'queued' ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1")
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (CLAIM_LOCK,))
+        if db.one(conn, "SELECT 1 AS x FROM jobs WHERE status = 'running'"):
+            return None
+        job = db.one(conn, "SELECT * FROM jobs WHERE status = 'queued' AND queue = ANY(%s) ORDER BY id "
+                           "FOR UPDATE SKIP LOCKED LIMIT 1", list(queues))
         if job is None:
             return None
         return db.one(conn, "UPDATE jobs SET status = 'running', started_at = now() WHERE id = %s RETURNING *",
@@ -45,10 +60,10 @@ def cancel_requested(conn, job_id):
     return bool(row and row["cancel_requested"])
 
 
-def recover(conn):
-    """Jobs left running by a worker that stopped (restart, crash) are marked failed."""
+def recover(conn, queues=QUEUES):
+    """Jobs of these queues left running by their worker that stopped (restart, crash) are marked failed."""
     conn.execute("UPDATE jobs SET status = 'failed', error = 'the worker stopped during the job', "
-                 "finished_at = now() WHERE status = 'running'")
+                 "finished_at = now() WHERE status = 'running' AND queue = ANY(%s)", (list(queues),))
 
 
 def prune_logs(conn, days):

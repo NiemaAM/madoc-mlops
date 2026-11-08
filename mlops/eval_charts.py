@@ -76,3 +76,91 @@ def log_model_run(task, result):
                                       for page, values in sorted(result["pages"].items())])
     wandb.log(data)
     return sorted(data)
+
+# --- the new numbers: W&B tables and the figures of the app (mlops/charts.py) ------------------------------
+def log_details(result):
+    """The scores of mlops/scoring.py in the current W&B run: numbers, characters and anonymous labels only."""
+    import wandb
+    summary = result.get("summary")
+    if not summary:
+        return
+    from mlops.textmetrics import CATEGORIES, OPERATIONS
+    data = {
+        "error_composition": wandb.Table(
+            columns=["operation", *CATEGORIES],
+            data=[[op, *(summary["composition"][op][c] for c in CATEGORIES)] for op in OPERATIONS]),
+        "confusions": wandb.Table(columns=["reference", "prediction", "count"],
+                                  data=[[r or "∅", p or "∅", n] for r, p, n in summary["confusions"]]),
+        "names": wandb.Table(columns=["field|page", "names", "exact", "normalized", "cer", "label_without_name"],
+                             data=[[k, v["names"], v["exact"], v["normalized"], v["cer"], v["label_without_name"]]
+                                   for k, v in summary["names"].items()]),
+        "form_rows": wandb.Table(columns=["row|page", "cer"], data=[[k, v] for k, v in summary["form_rows"].items()]),
+        "writers": wandb.Table(columns=["writer", "pages", "chars", "cer", "cer_lp"],
+                               data=[[w, v["pages"], v["chars"], v["cer"], v["cer_lp"]]
+                                     for w, v in summary["writers"].items()]),
+        "intervals": wandb.Table(columns=["metric", "value", "low", "high", "interval"],
+                                 data=[[k, v, *(summary["ci"].get(k) or [None, None]), summary["interval"]]
+                                       for k, v in summary["metrics"].items()]),
+    }
+    if result.get("detection"):
+        data["line_detection"] = wandb.Table(columns=list(result["detection"]), data=[list(result["detection"].values())])
+    wandb.log(data)
+
+
+def summary_figures(summaries, folder, pipelines=None, prefix=""):
+    """The figures of one or more models' summaries (mlops/scoring.py) in `folder` -> names saved.
+    pipelines: {model: {"gt_cer", "e2e_cer", "precision", "recall"}} for the end-to-end breakdown."""
+    from mlops import charts
+    saved = []
+
+    def keep(fig, name, text):
+        if fig is not None:
+            charts.save(fig, folder, prefix + name)
+            charts.caption(folder, prefix + name, text)
+            saved.append(prefix + name)
+
+    keep(charts.error_composition({m: {"composition": s["composition"], "chars": s["chars"]}
+                                   for m, s in summaries.items()}),
+         "error_composition", "Error composition: substitutions, missed and extra characters, by kind of character")
+    names = {m: {k: v["cer"] for k, v in s["names"].items() if k != "all"} for m, s in summaries.items()}
+    if any(names.values()):
+        keep(charts.names_chart(names), "names_cer", "Name CER per field (child's names), page 1 and page 2")
+    for m, s in summaries.items():
+        pairs = {(r, p): n for r, p, n in s["confusions"]}
+        if pairs:
+            keep(charts.confusion_heatmap(pairs, title=f"Character confusions, {m}"), f"confusions_{m}",
+                 f"Letter-shape confusion heatmap ({m})")
+    rows = sorted({k for s in summaries.values() for k in s["form_rows"]},
+                  key=lambda k: (k.split("|")[1], k))
+    if rows:
+        labels = [f'{k.split("|")[0]} (p.{k.split("|")[1]})' for k in rows]
+        values = {(labels[i], m): s["form_rows"].get(k) for i, k in enumerate(rows) for m, s in summaries.items()}
+        keep(charts.heatmap("CER per form row", labels, list(summaries), values), "form_rows",
+             "Form row x model CER heatmap")
+    writers = sorted({w for s in summaries.values() for w in s["writers"]})
+    if writers:
+        values = {(w, m): s["writers"].get(w, {}).get("cer") for w in writers for m, s in summaries.items()}
+        keep(charts.heatmap("CER per writer", writers, list(summaries), values), "writers",
+             "Writer x model CER heatmap (writers anonymised)")
+    if pipelines:
+        keep(charts.e2e_breakdown(pipelines), "e2e_breakdown",
+             "End-to-end breakdown (page 2): CER on the true lines, what segmentation adds; line detection")
+    return saved
+
+
+def evaluation_figures(task, results, folder, gt_cer=None):
+    """The figures of an evaluation (candidate and production): the charts W&B always had, per model, and the
+    new ones (summary_figures)."""
+    from mlops import charts
+    from mlops.scoring import cer_of
+    for role, result in results.items():
+        report_figures = (charts.htr_report_figures if task == "htr" else charts.blla_report_figures)(result["report"])
+        for name, fig in report_figures.items():
+            charts.save(fig, folder, f"{role}_{name}")
+            charts.caption(folder, f"{role}_{name}", f"{name.replace('_', ' ')} ({role})")
+    pipelines = None
+    if task == "blla":
+        pipelines = {role: {"gt_cer": gt_cer, "e2e_cer": cer_of(r["summary"], "2") or cer_of(r["summary"]),
+                            "precision": (r.get("detection") or {}).get("precision"),
+                            "recall": (r.get("detection") or {}).get("recall")} for role, r in results.items()}
+    return summary_figures({role: r["summary"] for role, r in results.items()}, folder, pipelines)

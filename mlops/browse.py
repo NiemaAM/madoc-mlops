@@ -1,7 +1,9 @@
 """The Browse tab: the pages of a split (or the augmented train pages), their image with the lines drawn on it,
 their transcription and their PageXML.
 
-Pages are shown by their opaque id only: the original file names (page_origins) never reach the app.
+Pages are shown by their opaque id. With "show original names" (off by default, so a screenshot shows none), the
+original file name (page_origins) is shown next to the id and can be searched: the app is only reachable by the
+person who runs the platform, and the names never go to the job logs or W&B.
 """
 
 import html
@@ -28,11 +30,14 @@ def type_choices():
 
 
 def page_types_by_id(conn):
-    return {r["id"]: r["page_type"] for r in db.all_rows(conn, "SELECT id, page_type FROM pages")}
+    return {r["id"]: r["page_type"] for r in db.all_rows(conn, "SELECT id, page_type FROM pages "
+                                                               "WHERE deleted_at IS NULL")}
 
 
-def choices(conn, split, kind="all"):
-    """-> ([(label, value)], note). value: the XML path inside the data folder ("pages/<id>.xml" ...)."""
+def choices(conn, split, kind="all", show_names=False, search=""):
+    """-> ([(label, value)], note). value: the XML path inside the data folder ("pages/<id>.xml" ...).
+    show_names: the original file name in the label; search: only the pages whose original name or id contains
+    it (any split when searching)."""
     if split == AUGMENTED:
         found = augment.augmentations()
         if not found:
@@ -49,10 +54,29 @@ def choices(conn, split, kind="all"):
         note = (f"Augmentation {newest['folder'].name}: {newest['pages']} pages "
                 f"({newest['copies']} copies of the train pages, seed {newest['seed']}).")
         return out, note
-    rows = db.all_rows(conn, "SELECT id, page_type, lines, characters FROM pages WHERE split = %s "
-                             + ("" if kind == "all" else "AND page_type = %s ") + "ORDER BY page_type, id",
-                       *((split,) if kind == "all" else (split, kind)))
-    out = [(f'{r["id"]} · {type_label(r["page_type"])} · {r["lines"]} lines', f'pages/{r["id"]}.xml') for r in rows]
+    search = (search or "").strip()
+    where, args = ["p.deleted_at IS NULL"], []
+    if search:
+        where.append("(o.original_name ILIKE %s OR p.id ILIKE %s)")
+        args += [f"%{search}%", f"%{search}%"]
+    else:
+        where.append("p.split = %s")
+        args.append(split)
+    if kind != "all":
+        where.append("p.page_type = %s")
+        args.append(kind)
+    rows = db.all_rows(conn, "SELECT p.id, p.split, p.page_type, p.lines, p.held_out, o.original_name FROM pages p "
+                             "LEFT JOIN page_origins o ON o.page_id = p.id WHERE " + " AND ".join(where)
+                       + " ORDER BY p.page_type, p.id", *args)
+    out = []
+    for r in rows:
+        name = f' · {Path(r["original_name"] or "").stem}' if show_names else ""
+        where_ = f' · {r["split"]}' if search else ""
+        held = " · held out" if r["held_out"] else ""
+        out.append((f'{r["id"]}{name} · {type_label(r["page_type"])} · {r["lines"]} lines{where_}{held}',
+                    f'pages/{r["id"]}.xml'))
+    if search:
+        return out, f'{len(out)} pages match "{search}"' + ("" if kind == "all" else f" ({type_label(kind)})") + "."
     return out, f"{len(out)} pages in {split}" + ("" if kind == "all" else f" ({type_label(kind)})") + "."
 
 
@@ -101,11 +125,23 @@ def transcription_html(page):
             f"<div class='br-lines'>{rows}</div>")
 
 
-def show(value, show_lines=True):
+def origin(page_id):
+    """The original file name and the officer written on a page (private: only for the app, toggle on)."""
+    with db.connection() as conn:
+        row = db.one(conn, "SELECT o.original_name, w.raw_name, p.writer_key FROM pages p "
+                           "LEFT JOIN page_origins o ON o.page_id = p.id LEFT JOIN page_writers w ON w.page_id = p.id "
+                           "WHERE p.id = %s", page_id)
+    return row or {}
+
+
+def show(value, show_lines=True, show_names=False):
     """-> (image, transcription html, xml text, info markdown)."""
     if not value:
         return None, "", "", "Choose a page."
-    xml = resolve(value)
+    try:
+        xml = resolve(value)
+    except FileNotFoundError:
+        return None, "", "", "This page's file is not in the data folder (deleted or purged?)."
     page = read_page(xml)
     image = xml.parent / Path(page["image"].replace("\\", "/")).name
     picture = draw(image, page, show_lines) if image.is_file() else None
@@ -113,6 +149,13 @@ def show(value, show_lines=True):
     chars = sum(len(line["text"]) for line in page["lines"])
     info = (f"**{xml.stem}** · {page['width']} × {page['height']} px · {len(page['lines'])} lines · {words} words · "
             f"{chars} characters" + ("" if picture else " · *image not found*"))
+    if show_names and xml.parent.name == "pages":
+        found = origin(xml.stem)
+        from mlops.writers import label
+        if found.get("original_name"):
+            info += f" · original name `{Path(found['original_name']).stem}`"
+        info += (f" · writer {found.get('raw_name') or '—'} ({label(found.get('writer_key'))})"
+                 if found else "")
     return picture, transcription_html(page), xml.read_text(encoding="utf-8"), info
 
 

@@ -32,10 +32,12 @@ services:
     environment:
       MLOPS_DATABASE_URL: postgresql://mlops:${POSTGRES_PASSWORD}@db:5432/mlops
       MLOPS_AUTH: ${MLOPS_AUTH:?set MLOPS_AUTH in .env}
+      MLOPS_ADMINS: ${MLOPS_ADMINS:-}
     ports:
       - "127.0.0.1:7870:7870"       # this machine only; on the tailnet with "tailscale serve" (README)
     volumes:
       - data:/data                  # the uploads are written there
+      - runs:/runs:ro               # the figures of the trainings, evaluations and experiments (read only)
     deploy:
       resources:
         reservations:
@@ -82,11 +84,52 @@ services:
     stop_grace_period: 60s
     networks: [internal, madoc-shared]   # madoc-shared: to unload Gemma from MaDoc's Ollama before a job
 
+  # the other recognizers (CRNN, TrOCR-style, Qwen2.5-VL-3B): the same platform with transformers / peft, as the
+  # "baselines" queue. It shares the GPU with mlops-worker: a job starts only when no other job runs (mlops/jobs.py).
+  mlops-baselines:
+    build:
+      context: .
+      dockerfile: Dockerfile.baselines
+    image: madoc-mlops-baselines:latest
+    command: ["python", "-m", "mlops.worker"]
+    restart: unless-stopped
+    depends_on:
+      db: {condition: service_healthy}
+      mlops-worker: {condition: service_started}
+    environment:
+      MLOPS_DATABASE_URL: postgresql://mlops:${POSTGRES_PASSWORD}@db:5432/mlops
+      MLOPS_SECRET: ${MLOPS_SECRET:?set MLOPS_SECRET in .env}
+      WANDB_API_KEY: ${WANDB_API_KEY:?set WANDB_API_KEY in .env}
+      MLOPS_WORKER_NAME: baselines-worker
+      MLOPS_WORKER_QUEUES: baselines
+      HF_HOME: /hf-cache            # the model weights, downloaded once (no image or text is ever sent)
+      HF_HUB_DISABLE_TELEMETRY: "1"
+    volumes:
+      - data:/data
+      - runs:/runs
+      - hf-cache:/hf-cache
+    shm_size: 8gb
+    deploy:
+      resources:
+        limits:
+          memory: 24g
+        reservations:
+          devices:
+            - {driver: nvidia, count: all, capabilities: [gpu]}
+    healthcheck:
+      test: ["CMD", "python", "-m", "mlops.cli", "health", "worker"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 120s
+    networks: [internal]
+
 volumes:
   db:
   data:
   runs:
   release:
+  hf-cache:
 
 networks:
   internal: {}

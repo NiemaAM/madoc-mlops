@@ -41,7 +41,7 @@ def page_characters(page_id):
 def vocabulary(conn):
     """-> {split: Counter} for the pages of the dataset now."""
     by_split = {split: Counter() for split in SPLITS}
-    for row in db.all_rows(conn, "SELECT id, split FROM pages ORDER BY id"):
+    for row in db.all_rows(conn, "SELECT id, split FROM pages WHERE deleted_at IS NULL ORDER BY id"):
         by_split[row["split"]].update(page_characters(row["id"]))
     return by_split
 
@@ -49,7 +49,7 @@ def vocabulary(conn):
 def page_types(conn):
     """-> {split: Counter {page type: pages}}."""
     out = {split: Counter() for split in SPLITS}
-    for row in db.all_rows(conn, "SELECT split, page_type, count(*) AS n FROM pages GROUP BY 1, 2"):
+    for row in db.all_rows(conn, "SELECT split, page_type, count(*) AS n FROM pages WHERE deleted_at IS NULL GROUP BY 1, 2"):
         out[row["split"]][row["page_type"] or "?"] += row["n"]
     return out
 
@@ -122,6 +122,33 @@ def vocabulary_tsv(by_split, types=None):
     return "\n".join(lines) + "\n"
 
 
+def invisible(char):
+    """A space, or a character that cannot be seen in the image (no-break space, zero-width, direction marks)."""
+    return char.isspace() or unicodedata.category(char).startswith(("Z", "C"))
+
+
+def spaces_html(by_split, splits):
+    """The spaces and invisible characters, listed apart: they are a large share of the errors and a no-break
+    space looks exactly like a space (ingest.normalize replaces such characters)."""
+    counts = Counter()
+    for split in splits:
+        counts.update({c: n for c, n in (by_split.get(split) or {}).items() if invisible(c)})
+    total = sum(sum((by_split.get(s) or {}).values()) for s in splits) or 1
+    if not counts:
+        return "<div class='voc-summary'>No space or invisible character in these pages.</div>"
+    rows = "".join(
+        f"<tr><td class='voc-char'>{html.escape(shown(c))}</td><td>U+{ord(c):04X}</td>"
+        f"<td>{html.escape(unicodedata.name(c, 'control character').title())}</td><td>{n:,}</td>"
+        f"<td>{100 * n / total:.2f} %</td>"
+        + "".join(f"<td>{(by_split.get(s) or {}).get(c, 0):,}</td>" for s in SPLITS) + "</tr>"
+        for c, n in counts.most_common())
+    head = "".join(f"<th>{s}</th>" for s in SPLITS)
+    return (f"<div class='voc-summary'><b>Spaces and invisible characters</b> "
+            f"({100 * sum(counts.values()) / total:.1f} % of the characters)</div>"
+            f"<table class='voc-split'><thead><tr><th></th><th>code</th><th>name</th><th>count</th>"
+            f"<th>share</th>{head}</tr></thead><tbody>{rows}</tbody></table>")
+
+
 def vocabulary_html(by_split, scope="all"):
     splits = SPLITS if scope == "all" else [scope]
     counts = Counter()
@@ -145,7 +172,7 @@ def vocabulary_html(by_split, scope="all"):
     if n_no_train:
         summary += f" · <span class='voc-no-train-legend'><b>{n_no_train}</b> never seen in train</span>"
     tsv = html.escape(vocabulary_tsv({s: by_split.get(s) or Counter() for s in SPLITS}))
-    return (f"<style>{VOCABULARY_CSS}</style><div class='voc-summary'>{summary}</div>"
+    return (f"<style>{VOCABULARY_CSS}</style>{spaces_html(by_split, splits)}<div class='voc-summary'>{summary}</div>"
             f"<div class='voc-grid'>{''.join(cells)}</div>"
             f"<textarea id='voc-tsv' hidden readonly>{tsv}</textarea>")
 

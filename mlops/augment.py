@@ -65,14 +65,16 @@ def reuse(row, copies, seed, target):
     return False
 
 
-def augment(version, train_rows, log, should_stop=lambda: False, copies=None, seed=None):
-    """-> the XML paths of the augmented pages of the version (made if needed)."""
+def augment(version, train_rows, log, should_stop=lambda: False, copies=None, seed=None, root=None):
+    """-> the XML paths of the augmented pages of the version (made if needed). root: another folder than
+    <data>/augmented (the folds of a cross-validation): the pages already augmented are linked from the main
+    folder, and the main folder is left as it is."""
     from mlops.process import run
 
     settings = params()["augment"]
     copies = int(copies or settings["copies"])
     seed = int(settings["seed"] if seed is None else seed)
-    target = path("data") / "augmented" / folder_name(version, copies, seed)
+    target = (root or path("data") / "augmented") / folder_name(version, copies, seed)
     done = target / ".done"
     if not done.is_file():
         shutil.rmtree(target, ignore_errors=True)
@@ -94,7 +96,7 @@ def augment(version, train_rows, log, should_stop=lambda: False, copies=None, se
                  target, "--copies", copies, "--seed", seed], log, should_stop)
             shutil.rmtree(source, ignore_errors=True)
         done.write_text("ok\n")
-        for old in (path("data") / "augmented").iterdir():   # the augmentations of older versions
+        for old in (path("data") / "augmented").iterdir() if root is None else []:   # older versions' copies
             if old.is_dir() and not old.name.startswith(version["digest"]):
                 shutil.rmtree(old)
     else:
@@ -102,13 +104,13 @@ def augment(version, train_rows, log, should_stop=lambda: False, copies=None, se
     return sorted(str(p) for p in target.glob("*.xml"))
 
 
-def augmented_paths(version, train_rows, log, should_stop):
+def augmented_paths(version, train_rows, log, should_stop, root=None):
     """For a training: the newest augmentation of the version, else one made with params.yaml (augment)."""
-    found = latest(version)
+    found = latest(version) if root is None else None
     if found:
         log(f"augmented pages: {found['folder'].name} ({found['pages']} pages)")
         return sorted(str(p) for p in found["folder"].glob("*.xml"))
-    return augment(version, train_rows, log, should_stop)
+    return augment(version, train_rows, log, should_stop, root=root)
 
 
 def run_augment(conn, job, log, should_stop, set_wandb_url):
