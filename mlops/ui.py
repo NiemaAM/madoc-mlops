@@ -13,7 +13,7 @@ from pathlib import Path
 
 import gradio as gr
 
-from mlops import augment, browse, db, jobs, settings as app_settings
+from mlops import augment, browse, datasets, db, jobs, settings as app_settings
 from mlops.config import SPLITS, TASKS, params, path
 from mlops.resources import gpu_stats, host_stats
 from mlops.vocabulary import coverage_html, page_types, vocabulary, vocabulary_html
@@ -113,12 +113,25 @@ def split_from_form(split_by, val, test, tolerance, missing, page1, page2):
 
 
 def augmentations_md():
+    """The augmentations on disk, and whether they belong to the dataset as it is now (after a new split or new
+    pages, the dataset is a new version: its train pages are augmented again, the old folder is then deleted)."""
     found = augment.augmentations()
     if not found:
         return "No augmented pages yet."
-    return "\n".join(f"- `{a['folder'].name}`: {a['pages']} pages ({a['copies']} copies, seed {a['seed']})"
-                     + (" (newest, used by the trainings of this version)" if i == 0 else "")
-                     for i, a in enumerate(found))
+    with db.connection() as conn:
+        current = datasets.snapshot(conn)
+    train = (current["counts"] or {}).get("train", 0)
+    lines = []
+    for a in found:
+        if a["digest"] == current["digest"]:
+            note = f"the current dataset version ({train} train pages): used by the trainings"
+        else:
+            note = ("an OLDER dataset version (before the last split or upload): not used; replaced and deleted "
+                    "at the next augmentation or training")
+        lines.append(f"- `{a['folder'].name}`: {a['pages']} pages ({a['copies']} copies, seed {a['seed']}): {note}")
+    if not any(a["digest"] == current["digest"] for a in found):
+        lines.append(f"- the current version `{current['digest']}` ({train} train pages) has no augmentation yet")
+    return "\n".join(lines)
 
 
 def vocabulary_view(scope="all"):
