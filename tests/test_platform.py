@@ -881,7 +881,7 @@ def test_two_cers_composition_names_and_intervals():
             rows.append({"page": pid, "line": i, "ref": text, "pred": pred})
     rows.append({"page": "c", "line": None, "ref": "", "pred": "xx"})        # a line found that is not there
     summary = score(rows, pages)
-    assert summary["interval"] == "by writer" and summary["writers_count"] == 3
+    assert summary["interval"].startswith("by page") and summary["writers_count"] == 3   # 3 < 5 writers
     assert summary["metrics"]["cer"] > 0 and summary["metrics"]["cer_lp"] > 0
     low, high = summary["ci"]["cer"]
     assert low <= summary["metrics"]["cer"] <= high
@@ -1054,7 +1054,7 @@ def test_crossval_by_writer_and_the_full_pipeline(env, madoc_remote, monkeypatch
         assert [j["status"] for j in done] == ["done", "done"], done
         cv, pipe = db.all_rows(conn, "SELECT * FROM experiments ORDER BY id")
         s = cv["summary"]
-        assert len(s["folds"]) == 4 and s["writers_count"] == 4 and s["interval"] == "by writer"
+        assert len(s["folds"]) == 4 and s["writers_count"] == 4 and s["interval"].startswith("by page")
         assert sum(f["test"] for f in s["folds"]) == len(pages)              # every page tested once
         assert all(not set(f["writers"]) & set(g["writers"]) for f in s["folds"] for g in s["folds"] if f is not g)
         assert s["metrics"]["cer"] == 0.0 and s["names"]["all"]["exact"] == 100.0   # the fake candidate reads all
@@ -1127,3 +1127,12 @@ def test_git_failure_says_why(env, monkeypatch):
         release.git("fetch", str(env / "nowhere.git"), "master")
     assert "git fetch" in str(failure.value) and "secret-token" not in str(failure.value)
     assert "dubious" in release.GIT_HINTS[1][0][0] and any("401" in keys for keys, _ in release.GIT_HINTS)
+
+
+def test_intervals_by_writer_need_enough_writers():
+    from mlops.scoring import with_interval
+    units = {f"p{i}": (i % 3, 10) for i in range(12)}
+    two = {u: f"W{i % 2}" for i, u in enumerate(units)}
+    six = {u: f"W{i % 6}" for i, u in enumerate(units)}
+    assert with_interval(units, two) == with_interval(units, {})               # 2 writers: by page
+    assert with_interval(units, six) != with_interval(units, {})               # 6 writers: by writer

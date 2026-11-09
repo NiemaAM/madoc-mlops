@@ -37,10 +37,16 @@ def interval_settings():
     return gate.get("bootstrap_samples", 2000), gate.get("confidence", 0.95)
 
 
+def min_writers():
+    """Below this many writers, drawing the writers again says nothing (with 2 writers the resamples are writer
+    A, writer B or both): the interval is then by page, as the gate does (gate.group_bootstrap_min_groups)."""
+    return (params().get("gate") or {}).get("group_bootstrap_min_groups", 5)
+
+
 def with_interval(units, groups):
-    """(value in %, low, high) of a ratio, by writer when 2 writers or more, else by unit."""
+    """(value in %, low, high) of a ratio, by writer with enough writers (min_writers), else by unit."""
     samples, confidence = interval_settings()
-    use_groups = groups if len({groups.get(u) for u in units}) >= 2 else None
+    use_groups = groups if len({groups.get(u) for u in units}) >= min_writers() else None
     value, low, high = ratio_interval(units, use_groups, samples, confidence)
     scale = lambda v: None if v is None else round(100 * v, 3)   # noqa: E731
     return scale(value), scale(low), scale(high)
@@ -109,7 +115,8 @@ def score(rows, pages, model="model"):
     return {
         "model": model, "pages": len(per_page), "lines": totals["lines"], "chars": totals["chars"],
         "metrics": metrics, "ci": ci,
-        "interval": "by writer" if len(set(writer_of.get(p) for p in per_page)) >= 2 else "by page",
+        "interval": ("by writer" if len(set(writer_of.get(p) for p in per_page)) >= min_writers()
+                     else f"by page (fewer than {min_writers()} writers: by writer would mean nothing)"),
         "writers_count": len(set(writer_of.get(p) for p in per_page)),
         "composition": composition,
         "confusions": [[r, p, n] for (r, p), n in confusions.most_common(400)],

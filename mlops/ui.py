@@ -257,8 +257,7 @@ def evaluation_details(evaluation_id):
              "| Metric | Production | Candidate |", "|---|---|---|"]
     production = e["production"] or {}
     lines += metric_rows(e["candidate"], production)
-    lines += ["", "Intervals: 95 %, " + ("by writer (the writers drawn again)" if c.get("unit") == "writer"
-                                       else "by register-year or by page") + " — CER, WER in %; names in %.",
+    lines += ["", f'Intervals: 95 %, {c.get("metric_interval") or "by page"} — CER, WER in %; names in %.',
               "", f'Per page ({c["pages"]} test pages, {c["metric"]}, positive = the candidate is better): '
                   f'mean gain **{c["gain"]:+.4f}**, {int(100 * c["confidence"])} % CI [{c["low"]:+.4f}, {c["high"]:+.4f}]']
     for subset, label in (("old", "pages the production model was evaluated on"), ("new", "pages added since")):

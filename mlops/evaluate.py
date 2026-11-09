@@ -265,6 +265,7 @@ def evaluate(conn, job, log, should_stop, set_wandb_url):
     comparison["wandb"] = {"group": group, "candidate": candidate_url, "production": production_url}
     comparison["excluded_pages"] = excluded
     comparison["unit"] = "writer" if unit == "writer_key" else "register-year"
+    comparison["metric_interval"] = result["summary"]["interval"]   # how the intervals of the metrics were drawn
     gt_cer = None
     if task == "blla" and htr_for_blla.is_file():
         gt_cer = cached_evaluation(
