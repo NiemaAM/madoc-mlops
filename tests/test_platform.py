@@ -307,6 +307,10 @@ def test_augmentation_reuses_the_pages_already_augmented(env):
                                for line in logs)
         folder = augment.augmentations()[0]["folder"]
         assert len(augment.augmentations()) == 1                                # the older version's folder is gone
+        from mlops import ui
+        assert "the current dataset version" in ui.augmentations_md()
+        conn.execute("UPDATE pages SET split = 'test' WHERE id = (SELECT min(id) FROM pages)")   # a new split
+        assert "OLDER dataset version" in ui.augmentations_md() and "no augmentation yet" in ui.augmentations_md()
         assert all((folder / name).read_bytes() == data for name, data in old_files.items())
 
 
@@ -1112,3 +1116,14 @@ def test_detailed_validation_curves(env):
         wandb.finish()
     assert all({"val_cer", "val_cer_lp", "val_cer_script_Arabic"} <= set(e) for e in epochs)
     assert not list((folder / "detail").glob("*.mlmodel"))                # the converted epochs are removed
+
+
+def test_git_failure_says_why(env, monkeypatch):
+    from mlops import release
+    monkeypatch.setenv("GH_TOKEN", "secret-token")
+    monkeypatch.setenv("MLOPS_MADOC_REMOTE", str(env / "nowhere.git"))
+    (env / "release" / "madoc").mkdir(parents=True, exist_ok=True)
+    with pytest.raises(RuntimeError) as failure:
+        release.git("fetch", str(env / "nowhere.git"), "master")
+    assert "git fetch" in str(failure.value) and "secret-token" not in str(failure.value)
+    assert "dubious" in release.GIT_HINTS[1][0][0] and any("401" in keys for keys, _ in release.GIT_HINTS)

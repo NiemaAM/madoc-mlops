@@ -32,9 +32,34 @@ def git_env():
             "GIT_CONFIG_VALUE_0": f"AUTHORIZATION: basic {basic}", "GIT_TERMINAL_PROMPT": "0"}
 
 
+GIT_HINTS = [   # what git says -> what to do
+    (("401", "403", "authentication failed", "could not read username", "invalid username or password",
+      "repository not found"),
+     "GitHub refused the token: GH_TOKEN has expired or lost access to the repository. Make a new fine-grained "
+     "token (README, GH_TOKEN), put it in .env, then: docker compose up -d mlops-worker"),
+    (("dubious ownership",),
+     "the clone in the release volume belongs to another user (image rebuilt?): "
+     "docker compose exec -u root mlops-worker chown -R mlops /release"),
+    (("could not resolve host", "connection timed out", "failed to connect", "network is unreachable"),
+     "the worker cannot reach github.com: check the machine's internet connection / proxy"),
+    (("couldn't find remote ref",),
+     "the branch of params.yaml (release.branch) does not exist on the repository"),
+]
+
+
 def git(*args, cwd=None):
-    return subprocess.run(["git", *args], cwd=cwd or clone_dir(), check=True, text=True, capture_output=True,
-                          env={**os.environ, **git_env()}).stdout.strip()
+    """Run git (the token as a header); a failure says what git said and what to do."""
+    result = subprocess.run(["git", *args], cwd=cwd or clone_dir(), text=True, capture_output=True,
+                            env={**os.environ, **git_env()})
+    if result.returncode != 0:
+        said = (result.stderr or result.stdout or "").strip()
+        token = os.environ.get("GH_TOKEN")
+        if token:
+            said = said.replace(token, "***")
+        hint = next((h for keys, h in GIT_HINTS if any(k in said.lower() for k in keys)), "")
+        raise RuntimeError(f"git {' '.join(map(str, args[:2]))} failed ({result.returncode}): {said[-600:]}"
+                           + (f"\n-> {hint}" if hint else ""))
+    return result.stdout.strip()
 
 
 def remote_url():
