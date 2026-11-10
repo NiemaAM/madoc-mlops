@@ -202,7 +202,8 @@ def ingest(conn, batch_id, source, force_split=None, log=print):
             f"{report['duplicates']} duplicates, {report['restored']} restored, {report['rejected']} rejected "
             f"{report['reasons'] or ''}" + (" (held-out batch: in test for good)" if report["held_out"] else ""))
         if placement["moved"]:
-            log(f"{placement['moved']} pages moved to the split of their writer (their act's page 2 came in)")
+            log(f"{placement['moved']} pages moved to the split of their writer (their act's page 2 came in; they "
+                "were in train only because their writer was unknown)")
         log(describe(report["coverage"]))
         log(f"normalized: {normalize.describe(normalized)}")
         return report
@@ -252,11 +253,15 @@ def place(conn, split=None, new_ids=(), fresh=False, apply=True, log=print):
     a unit go to the same split. A pinned page (held out, imported with --split) keeps its split. In "writer"
     mode, a page whose writer is unknown (its act has no page 2 yet) is trained on, never tested.
     fresh: every unit placed again (resplit); otherwise the units already in the dataset keep their split and
-    only the new ones (pages of new_ids only) are placed. apply=False computes without changing anything."""
+    only the new ones (pages of new_ids only) are placed. A page whose writer was unknown until now (the page 2 of
+    its act just came in) was in train only for that reason: it does not vote for the split of its writer, it
+    follows it (a new writer is placed freely, with all its pages). apply=False computes without changing
+    anything."""
     from mlops import writers
     split = split or app_settings.split(conn)
     mode = split_by(split)
     backfill_page_types(conn)
+    known_before = {r["id"] for r in db.all_rows(conn, "SELECT id FROM pages WHERE writer_key IS NOT NULL")}
     if mode == "writer":
         writers.sync(conn)
     rows = db.all_rows(conn, "SELECT id, group_key, writer_key, split, pinned_split, page_type FROM pages "
@@ -283,7 +288,7 @@ def place(conn, split=None, new_ids=(), fresh=False, apply=True, log=print):
             fixed[target].update(characters)
             fixed_types[target][row["page_type"]] += 1
             continue
-        if not fresh and row["id"] not in new_ids:
+        if not fresh and row["id"] not in new_ids and (mode != "writer" or row["id"] in known_before):
             votes.setdefault(unit(row), Counter())[row["split"]] += 1
         free.setdefault(unit(row), Counter()).update(characters)
         free_types.setdefault(unit(row), Counter())[row["page_type"]] += 1

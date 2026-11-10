@@ -978,6 +978,24 @@ def test_writer_independent_split_held_out_and_aliases(env):
         rows = db.all_rows(conn, "SELECT writer_key, split FROM pages WHERE writer_key IS NOT NULL")
         assert len({r["writer_key"] for r in rows}) == 6 and "writers placed again" in result["text"]
         assert all(len({r["split"] for r in rows if r["writer_key"] == w}) == 1 for w in {r["writer_key"] for r in rows})
+        # the page 2 of the orphan act comes in, by a writer already placed: its page 1 leaves train for that split
+        placed = db.one(conn, "SELECT writer_key, split FROM pages WHERE split = 'test' AND writer_key IS NOT NULL "
+                              "LIMIT 1")
+        name = next(t["writer"] for t in writers.table(conn) if t["key"] == placed["writer_key"])
+        _, report = ingest_texts(conn, env, "o", [("03010108_1_8_I_2016_1-2-1", (2, 251, 249), page2(name))])
+        act = {r["page_type"]: r for r in db.all_rows(conn, "SELECT p.* FROM pages p JOIN page_origins o ON "
+                                                            "o.page_id = p.id WHERE o.original_name LIKE %s", "%_8_I_%")}
+        assert act["1"]["writer_key"] == act["2"]["writer_key"] == placed["writer_key"]
+        assert act["1"]["split"] == act["2"]["split"] == "test" and report["moved"] == 1
+        # page 1s of a new writer, in train while their writer was unknown, do not tie that writer to train: it is
+        # placed as a new writer, with all its pages
+        ingest_texts(conn, env, "o1", [(f"03010108_1_11_I_2016_{a}-1-1", (5, 30 * a, 160), PAGE1) for a in range(3)])
+        _, report = ingest_texts(conn, env, "o2", [(f"03010108_1_11_I_2016_{a}-2-1", (6, 30 * a, 170),
+                                                     page2("نور الدين جديد")) for a in range(3)])
+        assert report["new_groups"] == 1
+        rows = db.all_rows(conn, "SELECT p.split, p.writer_key FROM pages p JOIN page_origins o ON o.page_id = p.id "
+                                 "WHERE o.original_name LIKE %s", "%_11_I_%")
+        assert len(rows) == 6 and len({r["split"] for r in rows}) == 1 and all(r["writer_key"] for r in rows)
         # a held-out batch: in test for good, through a new split, and reported when it shares a writer
         _, report = ingest_texts(conn, env, "held", act_pages(7, 1, "لحسن شميطي", (3, 3, 3)), held_out=True)
         assert report["held_out"] and report["added"]["test"] == 2
