@@ -431,6 +431,44 @@ def test_normalize_rules_from_the_app(env):
         assert read_page(stored)["lines"][1]["text"] == "في يوم"
 
 
+def test_normalize_words_and_the_officer_name(env):
+    from mlops import db, normalize, writers
+    from mlops.ingest import normalize_dataset, resplit
+    from mlops.pagexml import read_page
+    rules = {"المصصفي": "المصطفى", "المصصفي عبادي": "المصطفى عبادي", "\u00a0": " "}
+    fixed, found = normalize.text("والمصصفي عبادي\u00a0و المصصفي", rules)
+    assert fixed == "والمصطفى عبادي و المصطفى"                       # inside a word, the longest first, one pass
+    label = normalize.label("المصصفي عبادي")
+    assert found == {label: 1, normalize.label("المصصفي"): 1, "U+00A0": 1} and label.startswith("R-")
+    assert normalize.text("المصطفى", {"ى": "ي", "المصطفى": "X"})[0] == "X"  # a replacement is not replaced again
+    names = ["المصطفى عبادي", "عبد الرحيم كلفاع", "محمد العلوي", "سعيد بنعلي", "رشيد الإدريسي"]
+    with db.connection() as conn:
+        pages = []
+        for w, writer in enumerate(names):
+            for act in range(5):
+                pages += act_pages(w, act, writer, (w * 40, act * 12, 50))
+        pages += act_pages(7, 1, "المصصفي عبادي", (250, 250, 1)) + act_pages(7, 2, "المصصفي عبادي", (250, 1, 250))
+        ingest_texts(conn, env, "w", pages)
+        assert len(writers.table(conn)) == 6                                 # the misspelling: one more writer
+        conn.execute("UPDATE pages SET split = 'test' WHERE writer_key = (SELECT writer_key FROM pages WHERE id IN "
+                     "(SELECT page_id FROM page_writers WHERE raw_name = 'المصصفي عبادي') LIMIT 1)")
+        normalize.add_rule(conn, "المصصفي عبادي", "المصطفى عبادي")
+        rows = {r[1]: r for r in normalize.rules_rows(conn)}
+        assert rows["المصصفي عبادي"][0] == label and rows["المصصفي عبادي"][3] == "المصطفى عبادي"
+        logs = []
+        result = normalize_dataset(conn, log=logs.append)
+        assert result["replaced"] == {label: 2} and result["pages"] == 2      # the officer line of the 2 page 2s
+        assert "المصصفي" not in " ".join(logs) and label in " ".join(logs)   # the text never in the log
+        assert len(writers.table(conn)) == 5                                 # the officer read again: one writer
+        splits = db.all_rows(conn, "SELECT writer_key, split FROM pages WHERE writer_key IS NOT NULL")
+        assert all(len({r["split"] for r in splits if r["writer_key"] == w}) == 1 for w in {r["writer_key"] for r in splits})
+        page = db.one(conn, "SELECT page_id FROM page_writers WHERE raw_name = 'المصطفى عبادي' LIMIT 1")["page_id"]
+        assert "المصطفى عبادي" in " ".join(line["text"] for line in read_page(env / "data" / "pages" / f"{page}.xml")["lines"])
+        normalize.remove_rule(conn, "المصصفي عبادي")
+        assert "المصصفي عبادي" not in normalize.table(conn)
+        assert resplit(conn, log=lambda *_: None)["pages"]
+
+
 def test_dataset_versions(env):
     from mlops import datasets, db
     with db.connection() as conn:
@@ -760,6 +798,9 @@ def test_the_app_builds(env, monkeypatch):
     assert any(r[0] == "U+0649" and r[4] == "app" for r in table)
     table, _ = ui.on_normalize_rule("ى", "", remove=True)
     assert not any(r[0] == "U+0649" for r in table)
+    table, _ = ui.on_normalize_rule("المصصفي عبادي", "المصطفى عبادي")
+    assert any(r[1] == "المصصفي عبادي" and r[3] == "المصطفى عبادي" for r in table)
+    ui.on_normalize_rule("المصصفي عبادي", "", remove=True)
     # the preview zip: admins only (MLOPS_ADMINS, else the first login)
     monkeypatch.setenv("MLOPS_AUTH", "boss:x,guest:y")
     request = type("Request", (), {"username": "guest"})()

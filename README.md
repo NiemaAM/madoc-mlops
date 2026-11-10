@@ -255,9 +255,13 @@ Some characters look exactly like others in the image: a no-break space (U+00A0)
 space or a direction mark like nothing at all. The model cannot tell them apart, so each one in the ground truth
 is an error it learns. `params.yaml: ingest.normalize` lists them with their replacement, and **Data →
 Normalisation** adds your own rules: any character (typed, or its code `U+0649`, e.g. read in the Vocabulary)
-replaced by any text (empty: deleted; codes such as `U+0020` for a space). A rule of the app replaces the rule of
-params.yaml for the same character, and **Remove the rule** switches a params.yaml rule off; the rules of the app
-are kept in the database (table `settings`, name `normalize`). Every ingest applies the rules to the `<Unicode>`
+or any text — a misspelt word or name, `المصصفي عبادي` → `المصطفى عبادي` — replaced by any text (empty: deleted;
+codes such as `U+0020` for a space). A text is replaced wherever it is found, inside a word too, the longest rule
+first and in one pass (a replacement is never replaced again): check the Preview. A rule of the app replaces the
+rule of params.yaml for the same character or text, and **Remove the rule** switches a params.yaml rule off; the
+rules of the app are kept in the database (table `settings`, name `normalize`). A text rule may hold a name: logs
+and job results show it only as its label `R-…` (the rules table shows which text it is). When Normalize corrects
+an officer's name, the officer of the pages changed is read again and every page follows the split of its writer. Every ingest applies the rules to the `<Unicode>`
 texts (the batch report counts the replacements). For the pages already in the dataset, **Normalize** in the app, or:
 
 ```bash
@@ -298,7 +302,7 @@ job log, W&B or a figure.
 - **Missing pages**: the acts with only one page annotated, per register; the list of the file names to annotate
   is a download (it never goes to a job log).
 - **Normalisation**: the table of the rules (params.yaml and yours); **Add / change the rule** replaces a
-  character of your choice; Preview counts what the rules would change; Normalize runs them as a job (backup of
+  character or a word of your choice; Preview counts what the rules would change; Normalize runs them as a job (backup of
   the old files in `data/backup/`).
 - **Preview of the dataset as line images**: every line cut along its polygon, shuffled across the pages of its
   split, renamed by split, with its transcription and no metadata (zip entries with a fixed date). It is **not

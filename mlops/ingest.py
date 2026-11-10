@@ -337,8 +337,13 @@ def normalize_dataset(conn, log=print, apply=True):
     augmented pages were made from the old texts: they are deleted (a training makes them again). Before
     changing anything, the XML files changed are copied to <data>/backup/normalize-<time>/.
     apply=False: only counts what would change (the preview of the app).
-    -> {"replaced": Counter {"U+00A0": n}, "pages": pages changed, "backup": folder or None}."""
+    A rule may correct the officer's name ("المصصفي عبادي" -> "المصطفى عبادي"): the officer of the pages changed is
+    read again and every page follows the split of its writer (two spellings now one writer: one split).
+    -> {"replaced": Counter {"U+00A0": n, "R-1a2b3c": n}, "pages": pages changed, "backup": folder or None,
+        "moved": pages moved to the split of their writer}."""
     from datetime import datetime, timezone
+
+    from mlops import writers
     replacements = normalize.table(conn)
     total, changed = Counter(), []
     for row in db.all_rows(conn, "SELECT id FROM pages WHERE deleted_at IS NULL ORDER BY id"):
@@ -350,7 +355,7 @@ def normalize_dataset(conn, log=print, apply=True):
         if found:
             changed.append(row["id"])
             total.update(found)
-    backup = None
+    backup, moved = None, 0
     if apply and changed:
         backup = path("data") / "backup" / f'normalize-{datetime.now(timezone.utc):%Y%m%d-%H%M%S}'
         backup.mkdir(parents=True, exist_ok=True)
@@ -360,12 +365,16 @@ def normalize_dataset(conn, log=print, apply=True):
             normalize.file(xml_path, replacements)
             characters = sum(len(line["text"]) for line in read_page(xml_path)["lines"])
             conn.execute("UPDATE pages SET characters = %s WHERE id = %s", (characters, page_id))
+            writers.record(conn, page_id, [line["text"] for line in read_page(xml_path)["lines"]])
         shutil.rmtree(path("data") / "augmented", ignore_errors=True)
         shutil.rmtree(path("data") / "compiled", ignore_errors=True)
+        moved = place(conn, log=lambda *_: None)["moved"]
     log(f"{len(changed)} pages {'changed' if apply else 'would change'}: {normalize.describe(total)}"
         + (f" (backup of the old files: {backup.name}; augmented pages deleted: they are made again from the new "
-           "texts)" if backup else ""))
-    return {"replaced": dict(total), "pages": len(changed), "backup": str(backup) if backup else None}
+           "texts)" if backup else "")
+        + (f"; {moved} pages moved to the split of their writer (an officer's name was corrected)" if moved else ""))
+    return {"replaced": dict(total), "pages": len(changed), "backup": str(backup) if backup else None,
+            "moved": moved}
 
 
 def resplit(conn, log=print, split=None, apply=True):

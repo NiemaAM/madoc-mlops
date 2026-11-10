@@ -414,7 +414,7 @@ def on_normalize_rule(char, new, remove=False):
     """Add (or replace) / remove a rule, then show the rules and what they would change."""
     from mlops import normalize
     if not (char or "").strip() and char != " ":
-        raise gr.Error("Type the character to replace (or its code, e.g. U+0649).")
+        raise gr.Error("Type the character or the text to replace (or its code, e.g. U+0649).")
     try:
         with db.connection() as conn:
             if remove:
@@ -683,18 +683,22 @@ def build_app():
                     split_reset = gr.Button("Reset to params.yaml")
                 split_result = gr.HTML()
             with gr.Accordion("Normalisation of the transcriptions", open=False):
-                gr.Markdown("Characters replaced in the transcriptions: the rules of params.yaml "
-                            "(`ingest.normalize`: invisible or look-alike characters, a no-break space looks exactly "
-                            "like a space) and yours. A rule applies to the next ingests; **Preview** counts what it "
-                            "would change in the pages already in; **Normalize** rewrites them (a backup of the old "
-                            "files is kept in the data folder) and makes a new dataset version.")
-                normalize_table = gr.Dataframe(headers=["code", "character", "name", "replaced by", "from"],
+                gr.Markdown("Characters, words or phrases replaced in the transcriptions: the rules of "
+                            "params.yaml (`ingest.normalize`: invisible or look-alike characters, a no-break space "
+                            "looks exactly like a space) and yours (a character, or a misspelt word: "
+                            "`المصصفي عبادي` → `المصطفى عبادي`). A text is replaced wherever it is found, inside a "
+                            "word too: check the **Preview** before applying. A rule applies to the next ingests; "
+                            "**Normalize** rewrites the pages already in (a backup of the old files is kept in the "
+                            "data folder), reads the officer's name again and makes a new dataset version. In the "
+                            "logs a text rule appears only as its label (`R-…`): it may hold a name.")
+                normalize_table = gr.Dataframe(headers=["rule", "replaced", "what", "replaced by", "from"],
                                                interactive=False)
                 with gr.Row(equal_height=True):
-                    normalize_char = gr.Textbox(label="Character", placeholder="ى or U+0649", scale=1,
-                                                info="the character itself or its code (U+…), e.g. from the "
-                                                     "vocabulary")
-                    normalize_new = gr.Textbox(label="Replaced by", placeholder="ي, or empty to delete it", scale=1,
+                    normalize_char = gr.Textbox(label="Character or text", scale=1,
+                                                placeholder="ى, U+0649 or المصصفي عبادي",
+                                                info="a character, its code (U+…, e.g. from the vocabulary), or "
+                                                     "a word / several words")
+                    normalize_new = gr.Textbox(label="Replaced by", placeholder="ي or المصطفى عبادي, empty to delete", scale=1,
                                                info="text, or codes for invisible characters (U+0020 = a space)")
                     normalize_add = gr.Button("Add / change the rule", scale=0)
                     normalize_remove = gr.Button("Remove the rule", scale=0)
