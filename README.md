@@ -253,8 +253,12 @@ changing anything; **Apply** saves the settings (also used by the next ingests) 
 
 Some characters look exactly like others in the image: a no-break space (U+00A0) like a space, a zero-width
 space or a direction mark like nothing at all. The model cannot tell them apart, so each one in the ground truth
-is an error it learns. `params.yaml: ingest.normalize` lists them with their replacement; every ingest applies it
-to the `<Unicode>` texts (the batch report counts the replacements). For the pages already in the dataset:
+is an error it learns. `params.yaml: ingest.normalize` lists them with their replacement, and **Data →
+Normalisation** adds your own rules: any character (typed, or its code `U+0649`, e.g. read in the Vocabulary)
+replaced by any text (empty: deleted; codes such as `U+0020` for a space). A rule of the app replaces the rule of
+params.yaml for the same character, and **Remove the rule** switches a params.yaml rule off; the rules of the app
+are kept in the database (table `settings`, name `normalize`). Every ingest applies the rules to the `<Unicode>`
+texts (the batch report counts the replacements). For the pages already in the dataset, **Normalize** in the app, or:
 
 ```bash
 docker compose exec mlops-ui python -m mlops.cli normalize
@@ -293,8 +297,9 @@ job log, W&B or a figure.
   used a dataset version holding its pages.
 - **Missing pages**: the acts with only one page annotated, per register; the list of the file names to annotate
   is a download (it never goes to a job log).
-- **Normalisation**: Preview counts what `ingest.normalize` would change; Normalize runs it as a job (backup of the
-  old files in `data/backup/`).
+- **Normalisation**: the table of the rules (params.yaml and yours); **Add / change the rule** replaces a
+  character of your choice; Preview counts what the rules would change; Normalize runs them as a job (backup of
+  the old files in `data/backup/`).
 - **Preview of the dataset as line images**: every line cut along its polygon, shuffled across the pages of its
   split, renamed by split, with its transcription and no metadata (zip entries with a fixed date). It is **not
   anonymised** (names, dates, handwriting): only the admins (`MLOPS_ADMINS` in `.env`, else the first login of
@@ -357,7 +362,7 @@ What to watch: in **Compare & release**, the gain on the *old* test pages (the m
 | stop / start | `docker compose stop` / `docker compose start` (the data stays in the volumes) |
 | backup | `scripts/backup.sh /media/<encrypted-disk>/madoc-mlops-backup` (database dump + pages) |
 | acts with one page annotated | `docker compose exec mlops-ui python -m mlops.cli missing-pages --list` (the file names to annotate next) |
-| normalise the transcriptions | `docker compose exec mlops-ui python -m mlops.cli normalize` (after editing `ingest.normalize`) |
+| normalise the transcriptions | `docker compose exec mlops-ui python -m mlops.cli normalize` (after editing `ingest.normalize` or the rules of the app) |
 | split every group again | `docker compose exec mlops-ui python -m mlops.cli resplit` (before the first training) |
 
 **Backups.** The database and the `data` volume are the only copy of the dataset and of the private table of

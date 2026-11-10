@@ -147,7 +147,7 @@ def ingest(conn, batch_id, source, force_split=None, log=print):
             folder = source
         # 1. check every page
         reasons, candidates, seen, normalized = Counter(), [], set(), Counter()
-        replacements = normalize.table()
+        replacements = normalize.table(conn)
         xmls = sorted(folder.rglob("*.xml"))
         log(f"{len(xmls)} PageXML files")
         for number, xml_path in enumerate(xmls, 1):
@@ -327,13 +327,14 @@ def place(conn, split=None, new_ids=(), fresh=False, apply=True, log=print):
 
 
 def normalize_dataset(conn, log=print, apply=True):
-    """Apply ingest.normalize to the pages already in the dataset (their XML, their character count). The
+    """Apply the normalisation rules (params.yaml ingest.normalize and the app's, mlops/normalize.py) to the pages
+    already in the dataset (their XML, their character count). The
     augmented pages were made from the old texts: they are deleted (a training makes them again). Before
     changing anything, the XML files changed are copied to <data>/backup/normalize-<time>/.
     apply=False: only counts what would change (the preview of the app).
     -> {"replaced": Counter {"U+00A0": n}, "pages": pages changed, "backup": folder or None}."""
     from datetime import datetime, timezone
-    replacements = normalize.table()
+    replacements = normalize.table(conn)
     total, changed = Counter(), []
     for row in db.all_rows(conn, "SELECT id FROM pages WHERE deleted_at IS NULL ORDER BY id"):
         xml_path = path("data") / "pages" / f'{row["id"]}.xml'

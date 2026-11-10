@@ -4,7 +4,7 @@
     python -m mlops.cli health ui              # healthcheck of the app container (the database answers)
     python -m mlops.cli import /import/train --split train     # import an existing split (copied, then queued)
     python -m mlops.cli jobs                   # the last jobs
-    python -m mlops.cli normalize              # apply ingest.normalize to the pages already in the dataset
+    python -m mlops.cli normalize              # apply the normalisation rules to the pages already in the dataset
     python -m mlops.cli resplit                # split every group again, balanced on the characters (mlops/splitting.py)
     python -m mlops.cli missing-pages --list   # the acts with one page annotated: the missing page to annotate
     python -m mlops.cli writers                # the writers (officers) of the pages, the fewest pages first
@@ -84,7 +84,7 @@ def main(argv=None):
     i.add_argument("source", help="a folder or a zip visible inside the container")
     i.add_argument("--split", choices=SPLITS, help="put every page in this split (keep an existing split)")
     sub.add_parser("jobs")
-    sub.add_parser("normalize", help="apply ingest.normalize (params.yaml) to the pages already in the dataset")
+    sub.add_parser("normalize", help="apply the normalisation rules (params.yaml ingest.normalize and the app's) to the pages already in the dataset")
     sub.add_parser("resplit", help="split every group again, balanced on the characters (before the first training)")
     m = sub.add_parser("missing-pages", help="the acts with only one of their two pages annotated")
     m.add_argument("--list", action="store_true", help="also print the file names of the missing pages")

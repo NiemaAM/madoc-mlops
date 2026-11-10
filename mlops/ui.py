@@ -398,12 +398,32 @@ def missing_download():
 
 def normalize_preview():
     from mlops.ingest import normalize_dataset
-    from mlops.normalize import describe, table
+    from mlops.normalize import describe
     with db.connection() as conn:
         result = normalize_dataset(conn, log=lambda *_: None, apply=False)
-    rules = ", ".join(f"U+{ord(k):04X} → {'(deleted)' if v == '' else repr(v)}" for k, v in table().items())
-    return (f"Rules (params.yaml ingest.normalize): {rules or 'none'}\n\n"
-            f"**{result['pages']} pages would change**: {describe(result['replaced'])}")
+    return f"**{result['pages']} pages would change**: {describe(result['replaced'])}"
+
+
+def normalize_rules():
+    from mlops.normalize import rules_rows
+    with db.connection() as conn:
+        return rules_rows(conn)
+
+
+def on_normalize_rule(char, new, remove=False):
+    """Add (or replace) / remove a rule, then show the rules and what they would change."""
+    from mlops import normalize
+    if not (char or "").strip() and char != " ":
+        raise gr.Error("Type the character to replace (or its code, e.g. U+0649).")
+    try:
+        with db.connection() as conn:
+            if remove:
+                normalize.remove_rule(conn, char)
+            else:
+                normalize.add_rule(conn, char, new)
+    except ValueError as e:
+        raise gr.Error(str(e)) from None
+    return normalize_rules(), normalize_preview()
 
 
 def on_normalize():
@@ -663,10 +683,21 @@ def build_app():
                     split_reset = gr.Button("Reset to params.yaml")
                 split_result = gr.HTML()
             with gr.Accordion("Normalisation of the transcriptions", open=False):
-                gr.Markdown("Invisible or look-alike characters replaced (params.yaml `ingest.normalize`): a no-break "
-                            "space looks exactly like a space. **Preview** counts what would change; **Normalize** "
-                            "rewrites the pages (a backup of the old files is kept in the data folder) and makes a "
-                            "new dataset version.")
+                gr.Markdown("Characters replaced in the transcriptions: the rules of params.yaml "
+                            "(`ingest.normalize`: invisible or look-alike characters, a no-break space looks exactly "
+                            "like a space) and yours. A rule applies to the next ingests; **Preview** counts what it "
+                            "would change in the pages already in; **Normalize** rewrites them (a backup of the old "
+                            "files is kept in the data folder) and makes a new dataset version.")
+                normalize_table = gr.Dataframe(headers=["code", "character", "name", "replaced by", "from"],
+                                               interactive=False)
+                with gr.Row(equal_height=True):
+                    normalize_char = gr.Textbox(label="Character", placeholder="ى or U+0649", scale=1,
+                                                info="the character itself or its code (U+…), e.g. from the "
+                                                     "vocabulary")
+                    normalize_new = gr.Textbox(label="Replaced by", placeholder="ي, or empty to delete it", scale=1,
+                                               info="text, or codes for invisible characters (U+0020 = a space)")
+                    normalize_add = gr.Button("Add / change the rule", scale=0)
+                    normalize_remove = gr.Button("Remove the rule", scale=0)
                 with gr.Row():
                     normalize_preview_button = gr.Button("Preview")
                     normalize_button = gr.Button("Normalize the dataset", variant="primary")
@@ -844,6 +875,10 @@ def build_app():
         app.load(missing_view, None, [missing_table])
         missing_button.click(missing_download, None, [missing_file])
         normalize_preview_button.click(normalize_preview, None, [normalize_result])
+        app.load(normalize_rules, None, [normalize_table])
+        normalize_add.click(on_normalize_rule, [normalize_char, normalize_new], [normalize_table, normalize_result])
+        normalize_remove.click(lambda c: on_normalize_rule(c, "", remove=True), [normalize_char],
+                               [normalize_table, normalize_result])
         normalize_button.click(on_normalize, None, [jobs_view])
         batch_delete.click(lambda b: on_batch_action(b, "delete", ""), [batch_pick], [batches_view, dataset_view])
         batch_restore.click(lambda b: on_batch_action(b, "restore", ""), [batch_pick], [batches_view, dataset_view])

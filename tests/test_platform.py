@@ -388,6 +388,49 @@ def test_ingest_and_cli_normalize(env):
         assert normalize_dataset(conn, log=lambda *_: None)["replaced"] == {}
 
 
+def test_normalize_rules_from_the_app(env):
+    import pytest
+    from mlops import db, normalize
+    from mlops.ingest import ingest, normalize_dataset
+    from mlops.pagexml import read_page
+    assert normalize.character("U+0649") == "ى" and normalize.character("ى") == "ى"
+    assert normalize.replacement("U+0020") == " " and normalize.replacement("") == ""
+    assert normalize.replacement("ي") == "ي" and normalize.replacement("U+064A U+0627") == "يا"
+    with pytest.raises(ValueError):
+        normalize.character("ab")
+    with db.connection() as conn:
+        assert normalize.table(conn) == normalize.table()                      # nothing written in the app yet
+        table = normalize.add_rule(conn, "ى", "ي")                             # a rule of the app
+        assert table["ى"] == "ي"
+        table = normalize.add_rule(conn, "U+00A0", "")                         # replaces the rule of params.yaml
+        assert table[" "] == "" and normalize.table()[" "] == " "
+        with pytest.raises(ValueError):
+            normalize.add_rule(conn, "ى", "ى")
+        rows = {r[0]: r for r in normalize.rules_rows(conn)}
+        assert rows["U+0649"][3] == "ي" and rows["U+0649"][4] == "app" and rows["U+00A0"][3] == "(deleted)"
+        normalize.remove_rule(conn, "U+00A0")      # the app's rule goes, then the rule of params.yaml is off
+        assert " " not in normalize.table(conn)
+        assert normalize.remove_rule(conn, "U+200B") and "​" not in normalize.table(conn)
+        assert {r[0]: r[4] for r in normalize.rules_rows(conn)}["U+200B"] == "params.yaml (switched off)"
+        normalize.add_rule(conn, "U+200B", "")                                 # on again
+        assert normalize.table(conn)["​"] == ""
+        with pytest.raises(ValueError):
+            normalize.remove_rule(conn, "x")                                   # no rule for x
+        # ingest uses the app's rules; Normalize applies them to the pages already in
+        folder = env / "src-r"
+        make_page(folder, "03010108_1_1_I_2016_1-1-1", (10, 20, 30),
+                  texts=["مصطفى", "في يوم", "عام", "سنة", "جماعة", "موافق"])
+        batch = db.one(conn, "INSERT INTO batches DEFAULT VALUES RETURNING id")
+        report = ingest(conn, batch["id"], make_zip(folder, env / "r.zip"), log=lambda *_: None)
+        assert report["normalized"] == {"U+0649": 1}                           # U+00A0 switched off: kept
+        page = db.one(conn, "SELECT * FROM pages")
+        stored = env / "data" / "pages" / f'{page["id"]}.xml'
+        assert [line["text"] for line in read_page(stored)["lines"]][:2] == ["مصطفي", "في يوم"]
+        normalize.add_rule(conn, "U+00A0", "U+0020")
+        assert normalize_dataset(conn, log=lambda *_: None)["replaced"] == {"U+00A0": 1}
+        assert read_page(stored)["lines"][1]["text"] == "في يوم"
+
+
 def test_dataset_versions(env):
     from mlops import datasets, db
     with db.connection() as conn:
@@ -711,7 +754,12 @@ def test_the_app_builds(env, monkeypatch):
         ingest_texts(conn, env, "ui", [p for w in range(3) for p in act_pages(w, 1, f"كاتب {'ابت'[w]}", (w * 60, 5, 5))])
     rows, warning, *_ = ui.writers_view()
     assert len(rows) == 3 and all(r[1].startswith("W-") for r in rows)
-    assert "Rules" in ui.normalize_preview() and "pages would change" in ui.normalize_preview()
+    assert "pages would change" in ui.normalize_preview()
+    assert any(r[0] == "U+00A0" for r in ui.normalize_rules())
+    table, _ = ui.on_normalize_rule("ى", "ي")
+    assert any(r[0] == "U+0649" and r[4] == "app" for r in table)
+    table, _ = ui.on_normalize_rule("ى", "", remove=True)
+    assert not any(r[0] == "U+0649" for r in table)
     # the preview zip: admins only (MLOPS_ADMINS, else the first login)
     monkeypatch.setenv("MLOPS_AUTH", "boss:x,guest:y")
     request = type("Request", (), {"username": "guest"})()
