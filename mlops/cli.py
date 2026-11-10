@@ -131,7 +131,8 @@ def main(argv=None):
                 unread = writers.unread(conn)
                 print(f"\npage 2s without an officer name: {sum(e['pages'] for e in unread.values())}")
                 for register, e in unread.items():
-                    print(f"\n{register}: {e['pages']} pages, {e['no_line']} without any line holding 'طرفنا'")
+                    print(f"\n{register}: {e['pages']} pages, {e['no_line']} without any line holding 'طرفنا' "
+                          "(then the lines that look like it, hidden characters shown as ⟨U+…⟩)")
                     for stem, lines in e["examples"]:
                         print(f"  {stem}:")
                         for line in lines:

@@ -294,7 +294,10 @@ job log, W&B or a figure.
 - **Data → Writers**: one row per officer (the fewest pages first: what to annotate), its label in W&B and the
   figures (`W-1a2b3c`), its pages, acts, page 1 / page 2, acts missing a page, splits. Spellings that look like the
   same officer are listed: merge them ("This spelling … is the same officer as …"), then split again.
-  `python -m mlops.cli writers` prints the same table.
+  `python -m mlops.cli writers` prints the same table (`--unread`: the page 2s where no officer name is read).
+  **Choose the split of a writer**: pick a writer and `train` / `val` / `test`; it stays there at every split
+  (new batches of that writer too) and the other writers are balanced around it; `auto` gives it back to the
+  split. Then Split settings → Preview / Apply. E.g. two writers in `test` and one in `val`.
 - **Batches**: **Delete** takes the pages of a batch out of the dataset at once (files and rows kept: the dataset
   versions and models made with them stay traceable; **Restore** brings them back, as does uploading the same
   pages again). **Purge** (type `PURGE <batch>`) removes a deleted batch for good, only if no model or evaluation

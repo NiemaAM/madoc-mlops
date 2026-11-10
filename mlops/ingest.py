@@ -250,7 +250,8 @@ def place(conn, split=None, new_ids=(), fresh=False, apply=True, log=print):
     """Put every page of the dataset in its split -> {"pages", "groups", "coverage", "text", "moved", ...}.
 
     The unit placed is the writer (split_by "writer") or the register-year (split_by "group"): all the pages of
-    a unit go to the same split. A pinned page (held out, imported with --split) keeps its split. In "writer"
+    a unit go to the same split. A pinned page (held out, imported with --split) keeps its split, and a writer put
+    in a split by hand (writers.pins) stays there, resplit included: the others are balanced around it. In "writer"
     mode, a page whose writer is unknown (its act has no page 2 yet) is trained on, never tested.
     fresh: every unit placed again (resplit); otherwise the units already in the dataset keep their split and
     only the new ones (pages of new_ids only) are placed. A page whose writer was unknown until now (the page 2 of
@@ -294,6 +295,8 @@ def place(conn, split=None, new_ids=(), fresh=False, apply=True, log=print):
         free.setdefault(unit(row), Counter()).update(characters)
         free_types.setdefault(unit(row), Counter())[row["page_type"]] += 1
     known = {u: counter.most_common(1)[0][0] for u, counter in votes.items()}
+    by_hand = {u: s for u, s in writers.pins(conn).items() if u in free} if mode == "writer" else {}
+    known.update(by_hand)   # the writers put in a split by hand (Data, Writers): before any vote, resplit included
     for u, target in known.items():   # a unit already placed: its pages count as fixed
         fixed[target].update(free.pop(u))
         fixed_types[target].update(free_types.pop(u))
@@ -322,6 +325,7 @@ def place(conn, split=None, new_ids=(), fresh=False, apply=True, log=print):
             + ", ".join(f"{s} {pages[s]} pages ({units[s]} {unit_name}s)" for s in SPLITS)
             + (f"; {sum(1 for r in rows if r['id'] in forced and not r['pinned_split'])} pages without a known "
                "writer kept in train" if mode == "writer" else "")
+            + (f"; {len(by_hand)} writers placed by hand" if by_hand else "")
             + (f"; {sum(1 for r in rows if r['pinned_split'])} pinned pages (held out or imported with a split)"
                if any(r["pinned_split"] for r in rows) else "")
             + (f"; WARNING: {overlap} train/val pages share a writer with the held-out set" if overlap else "")

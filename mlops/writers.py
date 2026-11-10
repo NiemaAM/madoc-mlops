@@ -19,7 +19,7 @@ from pathlib import Path
 
 from mlops import db
 from mlops.config import keyed, params, path
-from mlops.fields import close_names, officer_lines, writer_key_text, writer_name
+from mlops.fields import close_names, officer_candidates, officer_lines, reveal, writer_key_text, writer_name
 from mlops.pagexml import read_page
 
 
@@ -142,9 +142,40 @@ def remove_alias(conn, variant):
     return sync(conn)
 
 
+def pins(conn):
+    """{writer key: split} chosen by hand in the app (Data, Writers): the split leaves these writers there and
+    places the others around them. Stored in the settings (name "writer_splits")."""
+    from mlops import settings as app_settings
+    from mlops.config import SPLITS
+    return {k: v for k, v in (app_settings.saved(conn, "writer_splits") or {}).items() if v in SPLITS}
+
+
+def pin(conn, writer, split):
+    """Put a writer (its name as shown in the app, or its label "W-1a2b3c") in a split for good; split "auto" (or
+    empty) lets the split place it again. Takes effect at the next split (Split settings: Preview / Apply)."""
+    from mlops import settings as app_settings
+    from mlops.config import SPLITS
+    sync(conn)
+    wanted = writer_key_text(writer or "")
+    match = [t for t in table(conn) if t["key"] and (t["writer"] == wanted or t["label"] == (writer or "").strip())]
+    if not match:
+        raise ValueError("choose a writer of the table")
+    saved = pins(conn)
+    if split in SPLITS:
+        saved[match[0]["key"]] = split
+    elif split in (None, "", "auto"):
+        saved.pop(match[0]["key"], None)
+    else:
+        raise ValueError(f"split: {', '.join(SPLITS)} or auto")
+    known = {t["key"] for t in table(conn)}
+    app_settings.save(conn, "writer_splits", {k: v for k, v in saved.items() if k in known})   # merged writers: gone
+    return saved
+
+
 def table(conn):
     """One row per writer, the fewest pages first: what to annotate next. Private: the names are shown."""
     names = page_names(conn)
+    chosen = pins(conn)
     rows = db.all_rows(conn, "SELECT id, act_key, writer_key, page_type, split, held_out FROM pages "
                              "WHERE deleted_at IS NULL")
     act_pages = defaultdict(set)
@@ -172,7 +203,7 @@ def table(conn):
         out.append({"writer": e["spellings"].most_common(1)[0][0] if e["spellings"] else "(unknown)",
                     "label": label(key), "key": key, "pages": e["pages"], "acts": len(e["acts"]),
                     "page1": e["page1"], "page2": e["page2"], "incomplete_acts": len(e["incomplete"]),
-                    "splits": dict(e["splits"]), "held_out": e["held_out"]})
+                    "splits": dict(e["splits"]), "held_out": e["held_out"], "pinned": chosen.get(key)})
     return sorted(out, key=lambda r: (r["key"] is None, r["pages"], r["writer"]))
 
 
@@ -204,7 +235,8 @@ def unread(conn):
         found = officer_lines(lines)
         if not found:
             entry["no_line"] += 1
-        elif len(entry["examples"]) < 3:
+            found = [reveal(t) for t in officer_candidates(lines)] or ["(no line looks like the officer line)"]
+        if len(entry["examples"]) < 3:
             entry["examples"].append((stem, found))
     return out
 

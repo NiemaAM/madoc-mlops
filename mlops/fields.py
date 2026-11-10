@@ -38,8 +38,9 @@ def is_latin(char):
 
 
 # --- the writer ---------------------------------------------------------------------------------------------
-# "من طرفنا نحن <name> موظف جماعي"; "نحن" may be missing, the name may be written on the next line
-OFFICER = re.compile(r"طرف\s*نا[\s،,:.\-…]*(?:نحن)?")
+# "من طرفنا نحن <name> موظف جماعي"; "نحن" may be missing, the name may be written on the next line, and the ن of
+# "طرفنا" is sometimes missed in the transcription ("من طرفا نحن")
+OFFICER = re.compile(r"طرف\s*ن?ا[\s،,:.\-…]*(?:نحن)?")
 STOP = re.compile(r"(?:ال)?(?:موظف|ضابط)")
 
 
@@ -50,11 +51,19 @@ def _name_part(text):
     return " ".join(w for w in text.split() if any(is_arabic(c) for c in w))
 
 
+def clean_text(text):
+    """A line as compared: presentation forms as plain letters (NFKC: "ﻃﺮﻓﻨﺎ" -> "طرفنا"), invisible format
+    characters removed (zero-width joiner / non-joiner, direction marks: they look like nothing), no diacritics nor
+    tatweel."""
+    text = unicodedata.normalize("NFKC", text or "")
+    return HARAKAT.sub("", "".join(c for c in text if unicodedata.category(c) != "Cf"))
+
+
 def writer_name(lines):
     """The officer named in the page ("من طرفنا نحن لحسن شميطي موظف جماعي" -> "لحسن شميطي"), or "".
-    Diacritics and tatweel are ignored; when the line ends after "من طرفنا نحن", the name is read on the next
-    line."""
-    clean = [HARAKAT.sub("", unicodedata.normalize("NFC", t or "")) for t in lines]
+    Hidden characters, diacritics and tatweel are ignored (clean_text); when the line ends after "من طرفنا نحن",
+    the name is read on the next line."""
+    clean = [clean_text(t) for t in lines]
     for index, text in enumerate(clean):
         match = OFFICER.search(text)
         if not match:
@@ -70,11 +79,35 @@ def writer_name(lines):
 
 def officer_lines(lines):
     """The lines that hold "طرفنا" (and the next one), for the diagnostic of the names not read."""
-    clean = [HARAKAT.sub("", unicodedata.normalize("NFC", t or "")) for t in lines]
+    clean = [clean_text(t) for t in lines]
     for index, text in enumerate(clean):
         if OFFICER.search(text):
             return clean[index:index + 2]
     return []
+
+
+def reveal(text):
+    """A line with every character that is not a plain Arabic or Latin letter, digit, space or common punctuation
+    shown by its code: "طر⟨U+200D⟩فنا" (what makes two lines that look the same differ)."""
+    plain = set(" .,:;-'\"()/،؛؟")
+    out = []
+    for c in text:
+        ordinary = (("ء" <= c <= "ي" or c in "ڭ") or c.isascii() and (c.isalnum() or c in plain)
+                    or c in plain or "٠" <= c <= "٩")
+        out.append(c if ordinary else f"⟨U+{ord(c):04X}⟩")
+    return "".join(out)
+
+
+def officer_candidates(lines):
+    """When no line holds "طرفنا": the lines that look like the officer line (close to "من طرفنا نحن", or holding
+    "موظف" / "نحن"), raw, for the diagnostic."""
+    from rapidfuzz import fuzz
+    out = []
+    for text in lines:
+        clean = clean_text(text)
+        if "موظف" in clean or "نحن" in clean or fuzz.partial_ratio("من طرفنا نحن", clean) >= 70:
+            out.append(text)
+    return out[:3]
 
 
 def writer_key_text(name):

@@ -343,7 +343,9 @@ def writers_view():
         spellings = writers.raw_spellings(conn)
         aliases = writers.aliases(conn)
     rows = [[w["writer"], w["label"], w["pages"], w["acts"], w["page1"], w["page2"], w["incomplete_acts"],
-             ", ".join(f"{k} {v}" for k, v in sorted(w["splits"].items())), w["held_out"]] for w in table]
+             ", ".join(f"{k} {v}" for k, v in sorted(w["splits"].items())), w["pinned"] or "auto",
+             w["held_out"]] for w in table]
+    known = [w["writer"] for w in table if w["key"]]
     if pairs:
         warning = ("⚠ **Spellings that may be the same officer** (merge them before splitting by writer, or the same "
                    "hand may be in train and test):\n" + "\n".join(f"- {a} ({na} pages) / {b} ({nb} pages)"
@@ -352,11 +354,23 @@ def writers_view():
         warning = "No two writer names look alike."
     names = sorted({name for name, _, _ in spellings} | {c for _, c, _ in spellings})
     alias_rows = [[variant, canonical] for variant, canonical in sorted(aliases.items())]
-    return rows, warning, gr.update(choices=names), gr.update(choices=names), alias_rows
+    return rows, warning, gr.update(choices=names), gr.update(choices=names), alias_rows, gr.update(choices=known)
 
 
 WRITER_HEADERS = ["writer (private)", "label (W&B, figures)", "pages", "acts", "page 1", "page 2",
-                  "acts missing a page", "splits", "held out"]
+                  "acts missing a page", "splits", "chosen split", "held out"]
+
+
+def on_pin(writer, split):
+    """Put a writer in a split by hand (or back to auto); the next split uses it."""
+    from mlops import writers
+    try:
+        with db.connection() as conn:
+            writers.pin(conn, writer, split)
+    except ValueError as e:
+        raise gr.Error(str(e)) from None
+    gr.Info(f"{writer}: {split}. Split settings → Preview shows the result, Apply splits again with it.")
+    return writers_view()
 
 
 def on_alias(variant, canonical):
@@ -650,6 +664,13 @@ def build_app():
                             "same act. The names stay in this app: W&B and the figures only see the labels. The "
                             "fewest pages first.")
                 writers_table = gr.Dataframe(headers=WRITER_HEADERS, interactive=False)
+                gr.Markdown("**Choose the split of a writer**: it stays there at every split, the other writers "
+                            "are balanced around it (`auto`: placed by the split again). Then **Split settings → "
+                            "Preview / Apply**. To test on two writers: put both in `test`, one in `val`.")
+                with gr.Row(equal_height=True):
+                    pin_writer = gr.Dropdown(label="Writer", choices=[])
+                    pin_split = gr.Dropdown(label="Split", choices=["auto", "train", "val", "test"], value="test")
+                    pin_button = gr.Button("Set the split of this writer", scale=0)
                 writers_warning = gr.Markdown()
                 with gr.Row():
                     alias_variant = gr.Dropdown(label="This spelling…", choices=[], allow_custom_value=True)
@@ -870,7 +891,8 @@ def build_app():
         vocabulary_refresh.click(vocabulary_view, [vocabulary_scope], [coverage_box, vocabulary_box])
         app.load(vocabulary_view, [vocabulary_scope], [coverage_box, vocabulary_box])
         vocabulary_copy.click(None, None, None, js=COPY_VOCABULARY_JS)
-        writer_outputs = [writers_table, writers_warning, alias_variant, alias_canonical, aliases_table]
+        writer_outputs = [writers_table, writers_warning, alias_variant, alias_canonical, aliases_table, pin_writer]
+        pin_button.click(on_pin, [pin_writer, pin_split], writer_outputs)
         writers_refresh.click(writers_view, None, writer_outputs)
         app.load(writers_view, None, writer_outputs)
         alias_button.click(on_alias, [alias_variant, alias_canonical], writer_outputs)

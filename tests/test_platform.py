@@ -948,7 +948,13 @@ def test_names_writers_and_form_rows():
     assert fields.writer_name(["من طَرفنا نحن: لحسن شميطي، موظف جماعي"]) == "لحسن شميطي"          # diacritics
     assert fields.writer_name(["وحرر لدينا من طرفنا نحن", "لحسن شميطي ضابط الحالة المدنية"]) == "لحسن شميطي"
     assert fields.writer_name(["من طرفنا لحسن شميطي ضابط الحالة المدنية"]) == "لحسن شميطي"   # without "نحن"
+    assert fields.writer_name(["من طرفا نحن لحسن اشميطي موظف جماعي"]) == "لحسن اشميطي"      # the ن missed
     assert fields.writer_name(["من طرفنا نحن ضابط الحالة المدنية", "وبعد تلاوة"]) == ""        # no name written
+    # hidden characters: a zero-width joiner, a direction mark, presentation forms (they look the same)
+    assert fields.writer_name(["من طر\u200dفنا نحن لحسن\u200f اشميطي موظف جماعي"]) == "لحسن اشميطي"
+    assert fields.writer_name(["من \ufec3\ufeae\ufed3\ufee8\ufe8e نحن لحسن اشميطي موظف جماعي"]) == "لحسن اشميطي"
+    assert fields.reveal("طر\u200dفنا ڭ 12") == "طر⟨U+200D⟩فنا ڭ 12"
+    assert fields.officer_candidates(["رسم ولادة", "من طرفتا نحن لحسن"]) == ["من طرفتا نحن لحسن"]   # a typo
     assert fields.close_names(fields.writer_key_text("لحسن شميطي"), fields.writer_key_text("لحسن اشميطي"))
     assert not fields.close_names("لحسن شميطي", "عبد الرحيم كلفاع")
     assert fields.form_rows(PAGE1, "1")[-1] == "Marginal notes" and fields.form_rows(page2("x"), "2")[4] == "Officer"
@@ -1081,6 +1087,43 @@ def test_names_not_read_are_listed_and_read_again(env):
         writers.sync(conn)
         writers.sync(conn)
         assert not writers.unread(conn) and len(writers.table(conn)) == 2
+
+
+def test_writers_put_in_a_split_by_hand(env):
+    from mlops import db, ui, writers
+    from mlops.ingest import resplit
+    names = ["لحسن شميطي", "عبد الرحيم كلفاع", "محمد العلوي", "سعيد بنعلي", "رشيد الإدريسي"]
+    with db.connection() as conn:
+        pages = []
+        for w, writer in enumerate(names):
+            for act in range(4 + w):
+                pages += act_pages(w, act, writer, (w * 40, act * 12, 50))
+        ingest_texts(conn, env, "p", pages)
+        label = next(t["label"] for t in writers.table(conn) if t["writer"] == writers.writer_key_text(names[1]))
+        writers.pin(conn, names[0], "test")
+        writers.pin(conn, label, "test")                                     # by its label too
+        writers.pin(conn, names[2], "val")
+        with pytest.raises(ValueError):
+            writers.pin(conn, "nobody", "test")
+        preview = resplit(conn, log=lambda *_: None, apply=False)
+        assert "3 writers placed by hand" in preview["text"]
+        result = resplit(conn, log=lambda *_: None)
+
+        def split_of(name):
+            return next(t["splits"] for t in writers.table(conn) if t["writer"] == writers.writer_key_text(name))
+
+        assert split_of(names[0]) == {"test": 8} and split_of(names[1]) == {"test": 10}
+        assert split_of(names[2]) == {"val": 12} and result["groups"]["test"] == 2 and result["groups"]["val"] == 1
+        assert set(split_of(names[3])) == set(split_of(names[4])) == {"train"}   # the others: around them
+        # a new batch of a writer placed by hand follows it; "auto" gives the writer back to the split
+        _, report = ingest_texts(conn, env, "p2", act_pages(0, 50, names[0], (9, 99, 199)))
+        assert report["added"]["test"] == 2
+        writers.pin(conn, names[0], "auto")
+        assert names[0] and [t["pinned"] for t in writers.table(conn)].count("test") == 1
+    rows, *_, pin_choices = ui.writers_view()
+    assert "chosen split" in ui.WRITER_HEADERS and any(r[8] == "val" for r in rows) and pin_choices["choices"]
+    ui.on_pin(names[2], "auto")
+    assert all(r[8] == "auto" or r[8] == "test" for r in ui.writers_view()[0])
 
 
 def test_page_1_keys_made_with_another_secret_are_repaired(env, monkeypatch):
