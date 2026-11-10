@@ -261,6 +261,7 @@ def place(conn, split=None, new_ids=(), fresh=False, apply=True, log=print):
     split = split or app_settings.split(conn)
     mode = split_by(split)
     backfill_page_types(conn)
+    writers.rekey(conn)
     known_before = {r["id"] for r in db.all_rows(conn, "SELECT id FROM pages WHERE writer_key IS NOT NULL")}
     if mode == "writer":
         writers.sync(conn)

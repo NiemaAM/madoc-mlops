@@ -43,6 +43,12 @@ def make_zip(folder, target):
     return target
 
 
+@pytest.fixture(autouse=True)
+def secret(monkeypatch):
+    """Every test hashes with a secret (mlops.config.keyed refuses to run without one)."""
+    monkeypatch.setenv("MLOPS_SECRET", "test-secret")
+
+
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     url = os.environ.get("MLOPS_TEST_DATABASE_URL")

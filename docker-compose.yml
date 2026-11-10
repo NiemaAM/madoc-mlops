@@ -32,6 +32,7 @@ services:
     environment:
       MLOPS_DATABASE_URL: postgresql://mlops:${POSTGRES_PASSWORD}@db:5432/mlops
       MLOPS_AUTH: ${MLOPS_AUTH:?set MLOPS_AUTH in .env}
+      MLOPS_SECRET: ${MLOPS_SECRET:?set MLOPS_SECRET in .env}   # the same keys as the worker (acts, writers)
       MLOPS_ADMINS: ${MLOPS_ADMINS:-}
     ports:
       - "127.0.0.1:7870:7870"       # this machine only; on the tailnet with "tailscale serve" (README)

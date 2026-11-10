@@ -945,6 +945,10 @@ def test_names_writers_and_form_rows():
                    "arabic_family": "الزياني"}                       # FILS DE / ET DE / the note are never names
     assert fields.name_spans(["الاسم الشخصي : ......"]) == {"arabic_first": (0, None, None)}   # label, no name
     assert fields.writer_name(page2("لحسن اشميطي")) == "لحسن اشميطي"
+    assert fields.writer_name(["من طَرفنا نحن: لحسن شميطي، موظف جماعي"]) == "لحسن شميطي"          # diacritics
+    assert fields.writer_name(["وحرر لدينا من طرفنا نحن", "لحسن شميطي ضابط الحالة المدنية"]) == "لحسن شميطي"
+    assert fields.writer_name(["من طرفنا لحسن شميطي ضابط الحالة المدنية"]) == "لحسن شميطي"   # without "نحن"
+    assert fields.writer_name(["من طرفنا نحن ضابط الحالة المدنية", "وبعد تلاوة"]) == ""        # no name written
     assert fields.close_names(fields.writer_key_text("لحسن شميطي"), fields.writer_key_text("لحسن اشميطي"))
     assert not fields.close_names("لحسن شميطي", "عبد الرحيم كلفاع")
     assert fields.form_rows(PAGE1, "1")[-1] == "Marginal notes" and fields.form_rows(page2("x"), "2")[4] == "Officer"
@@ -1054,6 +1058,59 @@ def test_writer_independent_split_held_out_and_aliases(env):
         assert all("03010108" not in label for label, _ in hidden)
         _, _, _, info = browse.show(options[0][1], True, True)
         assert "original name" in info and "writer" in info
+
+
+def test_names_not_read_are_listed_and_read_again(env):
+    from mlops import db, writers
+    with db.connection() as conn:
+        pages = act_pages(1, 1, "لحسن شميطي", (10, 10, 10))
+        pages += [("03010108_1_2_I_2005_4-2-1", (20, 20, 20), ["رسم ولادة رقم: 4", "في يوم : رابع",
+                                                             "الاسم الشخصي : مها", "PRENOM MAHA",
+                                                             "من طرفنا نحن ضابط الحالة المدنية",
+                                                             "وبعد تلاوة الرسم"])]
+        ingest_texts(conn, env, "u", pages)
+        unread = writers.unread(conn)
+        assert list(unread) == ["03010108_1_2_I_2005"] and unread["03010108_1_2_I_2005"]["pages"] == 1
+        assert unread["03010108_1_2_I_2005"]["examples"][0][1][0] == "من طرفنا نحن ضابط الحالة المدنية"
+        # a page 2 read without a name is read again at the next sync (the reading may have improved)
+        page = db.one(conn, "SELECT w.page_id FROM page_writers w JOIN pages p ON p.id = w.page_id "
+                             "WHERE w.raw_name = '' AND p.page_type = '2'")["page_id"]
+        stored = env / "data" / "pages" / f"{page}.xml"
+        stored.write_text(stored.read_text(encoding="utf-8").replace("نحن ضابط", "نحن محمد العلوي ضابط"),
+                          encoding="utf-8")
+        writers.sync(conn)
+        writers.sync(conn)
+        assert not writers.unread(conn) and len(writers.table(conn)) == 2
+
+
+def test_page_1_keys_made_with_another_secret_are_repaired(env, monkeypatch):
+    import hmac
+    from mlops import config, db, writers
+    from mlops.ingest import place
+    names = ["لحسن شميطي", "عبد الرحيم كلفاع", "محمد العلوي", "سعيد بنعلي", "رشيد الإدريسي"]
+    with db.connection() as conn:
+        pages = []
+        for w, writer in enumerate(names):
+            for act in range(4):
+                pages += act_pages(w, act, writer, (w * 40, act * 12, 50))
+        ingest_texts(conn, env, "k", pages)
+        # what the app container did without MLOPS_SECRET: the page 1s keyed with another secret, no writer
+        for row in db.all_rows(conn, "SELECT p.id, o.original_name FROM pages p JOIN page_origins o ON "
+                                     "o.page_id = p.id WHERE p.page_type = '1'"):
+            other = hmac.new(b"change-me", ("act:" + writers.act_template(Path(row["original_name"]).stem)).encode(),
+                             "sha256").hexdigest()[:16]
+            conn.execute("UPDATE pages SET act_key = %s, writer_key = NULL, split = 'train' WHERE id = %s",
+                         (other, row["id"]))
+        assert sum(t["pages"] for t in writers.table(conn) if t["key"] is None) == 20
+        result = place(conn, log=lambda *_: None)
+        assert not [t for t in writers.table(conn) if t["key"] is None]          # every page 1 has its writer
+        assert all(t["page1"] == t["page2"] == 4 and t["incomplete_acts"] == 0 for t in writers.table(conn))
+        acts = db.all_rows(conn, "SELECT act_key, count(DISTINCT split) AS n FROM pages GROUP BY act_key")
+        assert all(a["n"] == 1 for a in acts) and result["moved"] > 0           # each act in one split
+        # and no process may hash without the secret any more
+        monkeypatch.delenv("MLOPS_SECRET")
+        with pytest.raises(RuntimeError, match="MLOPS_SECRET"):
+            config.keyed("x")
 
 
 def test_delete_restore_and_purge_a_batch(env):

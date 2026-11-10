@@ -8,6 +8,7 @@
     python -m mlops.cli resplit                # split every group again, balanced on the characters (mlops/splitting.py)
     python -m mlops.cli missing-pages --list   # the acts with one page annotated: the missing page to annotate
     python -m mlops.cli writers                # the writers (officers) of the pages, the fewest pages first
+    python -m mlops.cli writers --unread       # + the page 2s where no officer name is read, and their line
     python -m mlops.cli pause                  # the worker takes no new job (the running one goes on)
     python -m mlops.cli wait-idle --timeout 36000    # wait until no job is running (0), or the timeout (1)
     python -m mlops.cli resume                 # the worker takes jobs again
@@ -88,7 +89,9 @@ def main(argv=None):
     sub.add_parser("resplit", help="split every group again, balanced on the characters (before the first training)")
     m = sub.add_parser("missing-pages", help="the acts with only one of their two pages annotated")
     m.add_argument("--list", action="store_true", help="also print the file names of the missing pages")
-    sub.add_parser("writers", help="the writers of the pages (private names: printed on this machine only)")
+    wr = sub.add_parser("writers", help="the writers of the pages (private names: printed on this machine only)")
+    wr.add_argument("--unread", action="store_true",
+                    help="the page 2s where no officer name is read, per register, with their officer line")
     sub.add_parser("pause", help="the worker takes no new job (before a deployment)")
     sub.add_parser("resume", help="the worker takes jobs again")
     w = sub.add_parser("wait-idle", help="wait until no job is running")
@@ -124,6 +127,15 @@ def main(argv=None):
                 print(f'{w["pages"]:>5} pages {w["acts"]:>5} acts  {w["label"]:<10} {w["writer"]}')
             for a, b, na, nb in writers.variants(conn):
                 print(f"same officer? {a} ({na}) / {b} ({nb})")
+            if args.unread:
+                unread = writers.unread(conn)
+                print(f"\npage 2s without an officer name: {sum(e['pages'] for e in unread.values())}")
+                for register, e in unread.items():
+                    print(f"\n{register}: {e['pages']} pages, {e['no_line']} without any line holding 'طرفنا'")
+                    for stem, lines in e["examples"]:
+                        print(f"  {stem}:")
+                        for line in lines:
+                            print(f"    | {line}")
     elif args.command == "wait-idle":
         return wait_idle(args.timeout)
     else:

@@ -19,7 +19,7 @@ from pathlib import Path
 
 from mlops import db
 from mlops.config import keyed, params, path
-from mlops.fields import close_names, writer_key_text, writer_name
+from mlops.fields import close_names, officer_lines, writer_key_text, writer_name
 from mlops.pagexml import read_page
 
 
@@ -46,13 +46,28 @@ def record(conn, page_id, lines):
                  "SET raw_name = EXCLUDED.raw_name", (page_id, writer_name(lines)))
 
 
+def rekey(conn):
+    """The act and the register-year of every page computed again from its file name -> pages fixed. A key made
+    another way (a process that had no MLOPS_SECRET, an older version, a page ingested before acts existed) would
+    keep page 1 apart from its page 2: this puts them together again."""
+    from mlops.ingest import group_of
+    pattern = params()["ingest"]["group_pattern"]
+    fixed = 0
+    for row in db.all_rows(conn, "SELECT p.id, p.act_key, p.group_key, o.original_name FROM pages p "
+                                 "JOIN page_origins o ON o.page_id = p.id"):
+        act, group = act_key(row["original_name"]), group_of(Path(row["original_name"]).stem, pattern)
+        if (act, group) != (row["act_key"], row["group_key"]):
+            conn.execute("UPDATE pages SET act_key = %s, group_key = %s WHERE id = %s", (act, group, row["id"]))
+            fixed += 1
+    return fixed
+
+
 def backfill(conn):
-    """The act of the pages ingested before acts existed, and the officer of the pages never read -> pages read."""
-    for row in db.all_rows(conn, "SELECT p.id, o.original_name FROM pages p JOIN page_origins o ON o.page_id = p.id "
-                                 "WHERE p.act_key IS NULL"):
-        conn.execute("UPDATE pages SET act_key = %s WHERE id = %s", (act_key(row["original_name"]), row["id"]))
+    """The act and group keys checked (rekey), and the officer of the pages never read -> pages read."""
+    rekey(conn)
+    # never read, or read without a name (read again: the reading may have improved since)
     rows = db.all_rows(conn, "SELECT p.id FROM pages p LEFT JOIN page_writers w ON w.page_id = p.id "
-                             "WHERE w.page_id IS NULL")
+                             "WHERE w.page_id IS NULL OR (w.raw_name = '' AND p.page_type = '2')")
     for row in rows:
         try:
             lines = [line["text"] for line in read_page(path("data") / "pages" / f'{row["id"]}.xml')["lines"]]
@@ -166,6 +181,32 @@ def variants(conn):
     counts = Counter(page_names(conn).values())
     names = sorted(counts)
     return [(a, b, counts[a], counts[b]) for i, a in enumerate(names) for b in names[i + 1:] if close_names(a, b)]
+
+
+def unread(conn):
+    """The page 2s where no officer is read, per register-year -> {register: {"pages": n, "no_line": n,
+    "examples": [officer lines]}}. Private (file names, names): printed on the machine only (cli writers --unread)."""
+    import re
+    group_pattern = params()["ingest"].get("group_pattern")
+    out = {}
+    rows = db.all_rows(conn, "SELECT p.id, o.original_name FROM pages p JOIN page_origins o ON o.page_id = p.id "
+                             "JOIN page_writers w ON w.page_id = p.id WHERE p.deleted_at IS NULL "
+                             "AND p.page_type = '2' AND w.raw_name = '' ORDER BY o.original_name")
+    for row in rows:
+        stem = Path(row["original_name"]).stem
+        match = re.match(group_pattern, stem) if group_pattern else None
+        entry = out.setdefault(match.group(1) if match else stem, {"pages": 0, "no_line": 0, "examples": []})
+        entry["pages"] += 1
+        try:
+            lines = [line["text"] for line in read_page(path("data") / "pages" / f'{row["id"]}.xml')["lines"]]
+        except (OSError, ValueError):
+            lines = []
+        found = officer_lines(lines)
+        if not found:
+            entry["no_line"] += 1
+        elif len(entry["examples"]) < 3:
+            entry["examples"].append((stem, found))
+    return out
 
 
 def raw_spellings(conn):

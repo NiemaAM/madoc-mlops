@@ -36,5 +36,10 @@ def keyed(value):
     """A keyed hash (MLOPS_SECRET) of a name that must not be stored as is: a group, an act, a writer."""
     import hashlib
     import hmac
-    secret = os.environ.get("MLOPS_SECRET", "").encode() or b"change-me"
+    # no default: a process without the secret would make other keys than the worker, and the two pages of an
+    # act (or the pages of a writer) would no longer match
+    secret = os.environ.get("MLOPS_SECRET", "").encode()
+    if not secret:
+        raise RuntimeError("MLOPS_SECRET is not set (see .env): every container that reads or writes the dataset "
+                           "needs the same value")
     return hmac.new(secret, value.encode(), hashlib.sha256).hexdigest()[:16]

@@ -38,19 +38,43 @@ def is_latin(char):
 
 
 # --- the writer ---------------------------------------------------------------------------------------------
-WRITER = re.compile(r"طرفنا\s*نحن[\s:.\-ـ…]*(?P<name>.*?)(?=\s*(?:ال)?(?:موظف|ضابط)|$)")
+# "من طرفنا نحن <name> موظف جماعي"; "نحن" may be missing, the name may be written on the next line
+OFFICER = re.compile(r"طرف\s*نا[\s،,:.\-…]*(?:نحن)?")
+STOP = re.compile(r"(?:ال)?(?:موظف|ضابط)")
+
+
+def _name_part(text):
+    """The Arabic words of a text, up to "موظف" / "ضابط" (the officer's title)."""
+    stop = STOP.search(text)
+    text = re.sub(r"[.…:،,\-]+", " ", text[:stop.start()] if stop else text)
+    return " ".join(w for w in text.split() if any(is_arabic(c) for c in w))
 
 
 def writer_name(lines):
-    """The officer named in the page ("من طرفنا نحن لحسن شميطي موظف جماعي" -> "لحسن شميطي"), or ""."""
-    for text in lines:
-        match = WRITER.search(text)
-        if match:
-            name = re.sub(r"[.…:ـ\-]+", " ", match.group("name"))
-            name = " ".join(w for w in name.split() if any(is_arabic(c) for c in w))
-            if name:
-                return name
+    """The officer named in the page ("من طرفنا نحن لحسن شميطي موظف جماعي" -> "لحسن شميطي"), or "".
+    Diacritics and tatweel are ignored; when the line ends after "من طرفنا نحن", the name is read on the next
+    line."""
+    clean = [HARAKAT.sub("", unicodedata.normalize("NFC", t or "")) for t in lines]
+    for index, text in enumerate(clean):
+        match = OFFICER.search(text)
+        if not match:
+            continue
+        rest = text[match.end():]
+        name = _name_part(rest)
+        if not name and not STOP.search(rest) and index + 1 < len(clean) and not OFFICER.search(clean[index + 1]):
+            name = _name_part(clean[index + 1])
+        if name:
+            return name
     return ""
+
+
+def officer_lines(lines):
+    """The lines that hold "طرفنا" (and the next one), for the diagnostic of the names not read."""
+    clean = [HARAKAT.sub("", unicodedata.normalize("NFC", t or "")) for t in lines]
+    for index, text in enumerate(clean):
+        if OFFICER.search(text):
+            return clean[index:index + 2]
+    return []
 
 
 def writer_key_text(name):
