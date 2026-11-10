@@ -5,7 +5,7 @@
            for Arabic; HATFormer's own code is not used: call it "TrOCR-style" in a paper);
     qwen   Qwen2.5-VL-3B-Instruct fine-tuned with LoRA to transcribe one line image.
 
-They run in their own container (Dockerfile.baselines: the platform's image plus transformers, peft, accelerate),
+They run in their own container (Dockerfile, target "baselines": the platform's image plus transformers, peft, accelerate),
 as the "baselines" queue of the jobs; they read the same line images as kraken (cut with kraken's polygon
 extraction, mlops/baselines/lines.py) and give back one row per true line, in logical order. Model weights are
 downloaded once into the Hugging Face cache (HF_HOME); no image or transcription leaves the machine.

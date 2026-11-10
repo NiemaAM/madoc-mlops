@@ -42,7 +42,13 @@ jobs:
       - name: Build the image
         run: |
           cd ${{ env.DEPLOY_DIR }}
-          docker compose build
+          # a download that times out (PyPI, the PyTorch index) is tried again: what was downloaded stays in the
+          # build cache, so a second try only fetches the rest
+          for attempt in 1 2 3; do
+            docker compose build && break
+            [ "$attempt" = 3 ] && { echo "the build failed 3 times"; exit 1; }
+            echo "build failed (attempt $attempt), trying again in 60 s"; sleep 60
+          done
           docker tag madoc-mlops:latest madoc-mlops:$(git rev-parse --short HEAD)
       - name: Pause the worker and wait for the running job
         run: |

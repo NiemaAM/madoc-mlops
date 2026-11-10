@@ -3,7 +3,7 @@
 name: madoc-mlops
 
 x-image: &image
-  build: .
+  build: {context: ., target: platform}     # Dockerfile: the stages "platform" and "baselines" share their deps
   image: madoc-mlops:latest
 
 services:
@@ -87,9 +87,7 @@ services:
   # the other recognizers (CRNN, TrOCR-style, Qwen2.5-VL-3B): the same platform with transformers / peft, as the
   # "baselines" queue. It shares the GPU with mlops-worker: a job starts only when no other job runs (mlops/jobs.py).
   mlops-baselines:
-    build:
-      context: .
-      dockerfile: Dockerfile.baselines
+    build: {context: ., target: baselines}
     image: madoc-mlops-baselines:latest
     command: ["python", "-m", "mlops.worker"]
     restart: unless-stopped

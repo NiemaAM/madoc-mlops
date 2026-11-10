@@ -26,7 +26,7 @@ one to MaDoc as a pull request. Everything runs on the GPU machine; the pages ne
 | `madoc-ollama` | MaDoc | Ollama + Gemma (spelling, translation) | yes | `madoc`; the worker, to unload Gemma |
 | `mlops-ui` | this repository | upload, buttons, jobs and live logs, comparisons, server resources | NVML only | your tailnet only (`tailscale serve`), with a login |
 | `mlops-worker` | this repository | runs the jobs one at a time: ingestion, training, evaluation, experiments, pull request | yes | nothing (no port) |
-| `mlops-baselines` | this repository | the other recognizers (CRNN, TrOCR-style, Qwen2.5-VL-3B): the same platform plus transformers / peft (`Dockerfile.baselines`); starts a job only when no other job runs | yes | nothing (no port) |
+| `mlops-baselines` | this repository | the other recognizers (CRNN, TrOCR-style, Qwen2.5-VL-3B): the same platform plus transformers / peft (`Dockerfile`, target `baselines`); starts a job only when no other job runs | yes | nothing (no port) |
 | `db` | this repository | PostgreSQL: pages, dataset versions, jobs and logs, models, evaluations | no | the two containers above only |
 
 The two projects are separate Docker Compose projects: deploying MaDoc never restarts a training, and the only
@@ -439,7 +439,6 @@ PyTorch).
 madoc-mlops/
 ├── docker-compose.yml        db, mlops-ui, mlops-worker, mlops-baselines
 ├── Dockerfile                the image of mlops-ui and mlops-worker (PyTorch CUDA 12.8, kraken 7.0.2)
-├── Dockerfile.baselines      + transformers, peft, accelerate (the other recognizers)
 ├── params.yaml               the settings
 ├── .env.example              the secrets to fill in .env
 ├── mlops/
