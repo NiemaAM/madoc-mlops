@@ -1343,3 +1343,42 @@ def test_intervals_by_writer_need_enough_writers():
     six = {u: f"W{i % 6}" for i, u in enumerate(units)}
     assert with_interval(units, two) == with_interval(units, {})               # 2 writers: by page
     assert with_interval(units, six) != with_interval(units, {})               # 6 writers: by writer
+
+def test_segmentation_checkpoint_chosen_by_line_f1(monkeypatch):
+    """ketos segtrain keeps and stops by the baseline F1, not the mean IU (mlops/ketos_logged.py). kraken and
+    lightning are replaced by stand-ins: the test checks what the wrapper passes them."""
+    import sys
+    import types
+    from mlops import ketos_logged
+
+    class Callback:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    lightning, pytorch, callbacks = (types.ModuleType(n) for n in ("lightning", "lightning.pytorch",
+                                                                    "lightning.pytorch.callbacks"))
+    callbacks.ModelCheckpoint = type("ModelCheckpoint", (Callback,), {})
+    lightning.pytorch, pytorch.callbacks = pytorch, callbacks
+    kraken, train, blla = (types.ModuleType(n) for n in ("kraken", "kraken.train", "kraken.train.blla"))
+    blla.EarlyStopping = type("EarlyStopping", (Callback,), {})
+    kraken.train, train.blla = train, blla
+    for name, module in {"lightning": lightning, "lightning.pytorch": pytorch, "lightning.pytorch.callbacks": callbacks,
+                         "kraken": kraken, "kraken.train": train, "kraken.train.blla": blla}.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    original_checkpoint, original_stopping = callbacks.ModelCheckpoint, blla.EarlyStopping
+    monkeypatch.delenv("MLOPS_SEG_MONITOR", raising=False)
+    assert ketos_logged.patch_segmentation_monitor(["ketos", "train"]) is None          # recognition: unchanged
+    assert callbacks.ModelCheckpoint is original_checkpoint
+    assert ketos_logged.patch_segmentation_monitor(["ketos", "-d", "cuda:0", "segtrain"]) == "val_bl_f1"
+    checkpoint = callbacks.ModelCheckpoint(monitor="val_metric", mode="max", save_top_k=10,
+                                           filename="checkpoint_{epoch:02d}-{val_metric:.4f}")
+    assert checkpoint.kwargs["monitor"] == "val_bl_f1"
+    assert checkpoint.kwargs["filename"] == "checkpoint_{epoch:02d}-{val_bl_f1:.4f}"
+    assert blla.EarlyStopping(monitor="val_mean_iu", mode="max", patience=5).kwargs["monitor"] == "val_bl_f1"
+    other = callbacks.ModelCheckpoint(monitor="val_loss")          # anything else: as kraken asked
+    assert other.kwargs["monitor"] == "val_loss"
+    # kraken's own choice back
+    callbacks.ModelCheckpoint, blla.EarlyStopping = original_checkpoint, original_stopping
+    monkeypatch.setenv("MLOPS_SEG_MONITOR", "val_mean_iu")
+    assert ketos_logged.patch_segmentation_monitor(["ketos", "segtrain"]) is None
+    assert callbacks.ModelCheckpoint is original_checkpoint

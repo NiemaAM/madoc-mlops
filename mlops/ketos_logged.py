@@ -11,6 +11,13 @@ The logger writes numbers only (ScalarsOnly). With a logger, kraken's recognitio
 16 validation lines as images and texts, which (1) crashes in kraken 7.0.2 (it passes a tuple to add_text:
 "'tuple' object has no attribute 'encode'") and (2) would copy pieces of the certificates into the run folder.
 kraken writes them only when the logger's experiment has add_image: here it has not.
+
+Segmentation (ketos segtrain): kraken 7.0.2 keeps the checkpoints and stops early by val_mean_iu, the pixel overlap
+averaged over the classes. On this data it goes the wrong way: the baselines are a few pixels wide, so a model that
+finds the lines better can overlap them less (job 66: line F1 0.957 -> 0.963 while mean IU 0.178 -> 0.174), and the
+model kept was the first epoch. The wrapper makes both follow val_bl_f1, the F1 of the baseline detection (what
+ketos segtest reports): the checkpoints are named checkpoint_<epoch>-<F1>.ckpt, so the best one by F1 is exported.
+MLOPS_SEG_MONITOR=val_mean_iu gives kraken's own choice back.
 """
 
 import os
@@ -61,8 +68,43 @@ def patch():
     utils.KrakenTrainer.__init__ = init
 
 
+SEG_MONITOR_DEFAULT = "val_bl_f1"
+
+
+def patch_segmentation_monitor(argv=None):
+    """ketos segtrain: the best checkpoint and the early stopping by MLOPS_SEG_MONITOR (default val_bl_f1)."""
+    argv = sys.argv if argv is None else argv
+    monitor = os.environ.get("MLOPS_SEG_MONITOR", SEG_MONITOR_DEFAULT)
+    if "segtrain" not in argv or monitor in ("", "val_mean_iu"):
+        return None
+    from lightning.pytorch import callbacks
+    from kraken.train import blla
+
+    checkpoint_class, stopping_class = callbacks.ModelCheckpoint, blla.EarlyStopping
+
+    class Checkpoint(checkpoint_class):
+        def __init__(self, *args, **kwargs):
+            if kwargs.get("monitor") == "val_metric":     # kraken's choice: the mean IU
+                kwargs["monitor"] = monitor
+                if kwargs.get("filename"):
+                    kwargs["filename"] = kwargs["filename"].replace("val_metric", monitor)
+            super().__init__(*args, **kwargs)
+
+    class Stopping(stopping_class):
+        def __init__(self, *args, **kwargs):
+            if kwargs.get("monitor") == "val_mean_iu":
+                kwargs["monitor"] = monitor
+            super().__init__(*args, **kwargs)
+
+    # ketos segtrain imports ModelCheckpoint when it runs (from lightning.pytorch.callbacks), blla imported
+    # EarlyStopping when it was loaded: each is replaced where kraken looks it up
+    callbacks.ModelCheckpoint, blla.EarlyStopping = Checkpoint, Stopping
+    return monitor
+
+
 def main():
     patch()
+    patch_segmentation_monitor()
     from kraken.ketos import cli
     sys.argv[0] = "ketos"
     cli()
