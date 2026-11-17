@@ -39,4 +39,4 @@ CMD ["python", "-m", "mlops.worker"]
 FROM deps AS platform
 COPY . .
 USER mlops
-CMD ["python", "-m", "mlops.ui"]
+CMD ["python", "-m", "mlops.web"]

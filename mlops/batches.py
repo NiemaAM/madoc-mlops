@@ -67,7 +67,7 @@ def purge(conn, batch_id, confirmation):
             conn, "SELECT DISTINCT version_id FROM dataset_pages WHERE page_id = ANY(%s)", ids)]
         conn.execute("DELETE FROM dataset_pages WHERE version_id = ANY(%s)", (versions,))
         conn.execute("DELETE FROM dataset_versions WHERE id = ANY(%s)", (versions,))
-        for table in ("page_origins", "page_writers"):
+        for table in ("page_origins", "page_writers", "page_revisions"):
             conn.execute(f"DELETE FROM {table} WHERE page_id = ANY(%s)", (ids,))
         conn.execute("DELETE FROM pages WHERE id = ANY(%s)", (ids,))
         conn.execute("UPDATE batches SET status = 'purged', report = coalesce(report, '{}'::jsonb) || %s "
@@ -80,5 +80,7 @@ def purge(conn, batch_id, confirmation):
     for page_id in ids:
         for file in augmented.glob(f"*/{page_id}_aug*"):
             file.unlink(missing_ok=True)
+    for page_id in ids:     # the edits of these pages (mlops/editing.py)
+        shutil.rmtree(path("data") / "revisions" / page_id, ignore_errors=True)
     shutil.rmtree(path("data") / "compiled", ignore_errors=True)
     return len(ids)

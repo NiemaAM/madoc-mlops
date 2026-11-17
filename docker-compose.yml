@@ -25,7 +25,7 @@ services:
 
   mlops-ui:
     <<: *image
-    command: ["python", "-m", "mlops.ui"]
+    command: ["python", "-m", "mlops.web"]   # FastAPI; the old Gradio app: python -m mlops.ui
     restart: unless-stopped
     depends_on:
       db: {condition: service_healthy}
@@ -42,14 +42,14 @@ services:
     deploy:
       resources:
         reservations:
-          devices:                  # NVML only (GPU usage in the Server tab), no compute
+          devices:                  # NVML only (GPU usage on the Monitoring page), no compute
             - {driver: nvidia, count: all, capabilities: [utility]}
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7870/', timeout=5)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7870/healthz', timeout=5)"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 30s
     networks: [internal]
 
   mlops-worker:

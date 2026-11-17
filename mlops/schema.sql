@@ -165,3 +165,21 @@ CREATE TABLE IF NOT EXISTS experiments (
 -- the folder of the figures of an evaluation (PNG / PDF, shown and downloaded in the app)
 ALTER TABLE evaluations ADD COLUMN IF NOT EXISTS figures text;
 ALTER TABLE models ADD COLUMN IF NOT EXISTS figures text;
+-- edits of a page in the app (Editor): the revision of its files now (0: as ingested), the revision a dataset
+-- version holds (its digest changes with it: a model trained on edited pages is traced to that revision), and the
+-- history of the revisions (their files in <data>/revisions/<page id>/, kept until the page is purged)
+ALTER TABLE pages ADD COLUMN IF NOT EXISTS revision integer NOT NULL DEFAULT 0;
+ALTER TABLE dataset_pages ADD COLUMN IF NOT EXISTS revision integer NOT NULL DEFAULT 0;
+CREATE TABLE IF NOT EXISTS page_revisions (
+    page_id     text NOT NULL REFERENCES pages(id),
+    revision    integer NOT NULL,
+    created_at  timestamptz NOT NULL DEFAULT now(),
+    username    text,
+    action      text NOT NULL,                             -- original, lines, rotate, crop, restore
+    note        text,
+    lines       integer NOT NULL,
+    characters  integer NOT NULL,
+    xml_file    text NOT NULL,                             -- file names in <data>/revisions/<page id>/
+    image_file  text NOT NULL,
+    PRIMARY KEY (page_id, revision)
+);

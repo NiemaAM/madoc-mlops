@@ -10,10 +10,26 @@ from mlops import db
 from mlops.config import SPLITS, path
 
 
+def digest_of(rows):
+    """The digest of (page, split, revision): a page never edited counts as before revisions existed, so the
+    versions made before keep their digest; an edited page (Editor) makes a new version."""
+    return hashlib.sha256("\n".join(f'{r["id"]}:{r["split"]}' + (f':r{r["revision"]}' if r.get("revision") else "")
+                                    for r in rows).encode()).hexdigest()[:16]
+
+
+def current_rows(conn):
+    return db.all_rows(conn, "SELECT id, split, revision FROM pages WHERE deleted_at IS NULL ORDER BY id")
+
+
+def current_digest(conn):
+    """The digest of the dataset now, without making a version (the app shows it)."""
+    return digest_of(current_rows(conn))
+
+
 def snapshot(conn):
     """The version holding every page of the dataset now (made if it does not exist yet) -> its row."""
-    rows = db.all_rows(conn, "SELECT id, split FROM pages WHERE deleted_at IS NULL ORDER BY id")
-    digest = hashlib.sha256("\n".join(f'{r["id"]}:{r["split"]}' for r in rows).encode()).hexdigest()[:16]
+    rows = current_rows(conn)
+    digest = digest_of(rows)
     existing = db.one(conn, "SELECT * FROM dataset_versions WHERE digest = %s", digest)
     if existing:
         return existing
@@ -23,8 +39,8 @@ def snapshot(conn):
                                "ON CONFLICT (digest) DO UPDATE SET digest = EXCLUDED.digest RETURNING *",
                          digest, db.json(counts))
         with conn.cursor() as cur:
-            cur.executemany("INSERT INTO dataset_pages (version_id, page_id, split) VALUES (%s, %s, %s) "
-                            "ON CONFLICT DO NOTHING", [(version["id"], r["id"], r["split"]) for r in rows])
+            cur.executemany("INSERT INTO dataset_pages (version_id, page_id, split, revision) VALUES (%s, %s, %s, %s) "
+                            "ON CONFLICT DO NOTHING", [(version["id"], r["id"], r["split"], r["revision"]) for r in rows])
     return version
 
 

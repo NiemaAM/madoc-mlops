@@ -2,7 +2,10 @@
 kraken==7.0.2
 wandb==0.28.0
 psycopg[binary]==3.3.6
-gradio==6.30.0
+gradio==6.30.0        # the former app (python -m mlops.ui), kept as a fallback
+fastapi==0.161.0      # the app (mlops/web)
+uvicorn==0.54.0
+python-multipart==0.0.32
 PyYAML==6.0.3
 python-bidi==0.6.12
 rapidfuzz==3.14.6
