@@ -69,7 +69,8 @@ jobs:
       - name: Check the app answers and the worker is alive
         run: |
           cd ${{ env.DEPLOY_DIR }}
-          curl -fsS --retry 40 --retry-delay 5 --retry-all-errors http://127.0.0.1:7870/ > /dev/null
+          # /healthz is the only address answered without a login: the app is up and reaches its database
+          curl -fsS --retry 40 --retry-delay 5 --retry-all-errors http://127.0.0.1:7870/healthz | grep -q '"ok"'
           for i in $(seq 1 30); do
             if docker compose ps --status running --services | grep -qx mlops-worker \
                && docker compose logs --since 10m mlops-worker | grep -q "ready"; then exit 0; fi
