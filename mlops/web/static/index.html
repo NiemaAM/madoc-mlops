@@ -1,0 +1,886 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>MaDoc MLOps</title>
+  <link rel="icon" href="/static/img/icon.png">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/theme.js"></script>
+  <script defer src="/static/editor.js"></script>
+  <script defer src="/static/app.js"></script>
+  <script defer src="/static/vendor/alpine.min.js"></script>
+</head>
+<body x-data="mlops()" x-cloak>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 15V4m0 0L7.5 8.5M12 4l4.5 4.5M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3"/></symbol>
+  <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 8a2 2 0 0 1 2-2h2l1.5-2h5L16 6h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><circle cx="12" cy="12.5" r="3.5"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M5 7h14M10 4h4M7 7l1 12a1.5 1.5 0 0 0 1.5 1.4h5A1.5 1.5 0 0 0 16 19l1-12M10.5 11v5M13.5 11v5"/></symbol>
+  <symbol id="i-undo" viewBox="0 0 24 24"><path d="M9 7L5 11l4 4"/><path d="M5 11h9a5 5 0 0 1 0 10h-2"/></symbol>
+  <symbol id="i-zoom-in" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.3-4.3M11 8.5v5M8.5 11h5"/></symbol>
+  <symbol id="i-zoom-out" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.3-4.3M8.5 11h5"/></symbol>
+  <symbol id="i-cursor" viewBox="0 0 24 24"><path d="M6 4l12 7-5.5 1.5L10 18z"/></symbol>
+  <symbol id="i-pen" viewBox="0 0 24 24"><path d="M4 20h4L19 9a2.1 2.1 0 0 0-4-4L4 16z"/><path d="M13.5 6.5l4 4"/></symbol>
+  <symbol id="i-box" viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="10" rx="1"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M19 12a7 7 0 1 1-2.05-4.95M19 4.5V8h-3.5"/></symbol>
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l10-6.5z"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11m0 0l-4.5-4.5M12 15l4.5-4.5M5 15v3a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M19.5 14.5A8 8 0 0 1 9.5 4.5a8 8 0 1 0 10 10z"/></symbol>
+  <symbol id="i-monitor" viewBox="0 0 24 24"><rect x="3" y="4.5" width="18" height="12" rx="1.5"/><path d="M9 20h6M12 16.5V20"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3.5H7a1.5 1.5 0 0 0-1.5 1.5v14A1.5 1.5 0 0 0 7 20.5h10a1.5 1.5 0 0 0 1.5-1.5V8z"/><path d="M14 3.5V8h4.5M9 12.5h6M9 16h6"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2.8l2 1.2 2.3-.2 1.2 2 2 1.2-.2 2.3 1.2 2-1.2 2 .2 2.3-2 1.2-1.2 2-2.3-.2-2 1.2-2-1.2-2.3.2-1.2-2-2-1.2.2-2.3-1.2-2 1.2-2-.2-2.3 2-1.2 1.2-2 2.3.2z"/></symbol>
+  <symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l3-7 4 14 3-7h4"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17.2v.3"/></symbol>
+  <symbol id="i-error" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5v5.5M12 16v.3"/></symbol>
+  <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5.5M12 7.8v.3"/></symbol>
+  <symbol id="i-success" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M8.5 12.3l2.5 2.5 4.5-5"/></symbol>
+  <symbol id="i-spell" viewBox="0 0 24 24"><path d="M4 15l3.5-9L11 15M5.3 12h4.4M13 6h3a2.25 2.25 0 0 1 0 4.5h-3V6zm0 4.5h3.5a2.25 2.25 0 0 1 0 4.5H13zM9 18.5l2 2 4-4"/></symbol>
+  <symbol id="i-translate" viewBox="0 0 24 24"><path d="M4 5.5h8M8 4v1.5c0 4-2 7-4.5 8.5M6 9c1 2 3 3.5 5 4.5M13 20l3.5-8.5L20 20M14.2 17.3h4.6"/></symbol>
+  <symbol id="i-left" viewBox="0 0 24 24"><path d="M14.5 6l-6 6 6 6"/></symbol>
+  <symbol id="i-right" viewBox="0 0 24 24"><path d="M9.5 6l6 6-6 6"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="1.5"/><circle cx="9" cy="10" r="1.6"/><path d="M20.5 16l-5-5L6 19.5"/></symbol>
+  <symbol id="i-lines" viewBox="0 0 24 24"><path d="M5 7h14M5 12h14M5 17h9"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M5 19h3.5L18 9.5a1.8 1.8 0 0 0-3.5-3.5L5 15.5z"/></symbol>
+  <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 5h5v5M19 5l-8 8M17 14v4a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 5 18V8.5A1.5 1.5 0 0 1 6.5 7H10"/></symbol>
+  <symbol id="i-cpu" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="1.5"/><path d="M10 3.5V7M14 3.5V7M10 17v3.5M14 17v3.5M3.5 10H7M3.5 14H7M17 10h3.5M17 14h3.5"/></symbol>
+  <symbol id="i-flow" viewBox="0 0 24 24"><rect x="3" y="4" width="6" height="5" rx="1"/><rect x="15" y="4" width="6" height="5" rx="1"/><rect x="9" y="15" width="6" height="5" rx="1"/><path d="M9 6.5h6M18 9v2.5a1.5 1.5 0 0 1-1.5 1.5h-3M6 9v2.5A1.5 1.5 0 0 0 7.5 13H10.5M12 13v2"/></symbol>
+  <symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7" ry="2.5"/><path d="M5 6v12c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5V6M5 12c0 1.4 3.1 2.5 7 2.5s7-1.1 7-2.5"/></symbol>
+  <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="4.5"/><circle cx="12" cy="12" r="1"/></symbol>
+  <symbol id="i-flask" viewBox="0 0 24 24"><path d="M9.5 3.5h5M10 3.5v6L4.8 18a1.6 1.6 0 0 0 1.4 2.5h11.6a1.6 1.6 0 0 0 1.4-2.5L14 9.5v-6M7.5 15h9"/></symbol>
+  <symbol id="i-list" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/><circle cx="4.5" cy="18" r="1"/></symbol>
+  <symbol id="i-rotl" viewBox="0 0 24 24"><path d="M4.5 9.5A8 8 0 1 1 6 16.5"/><path d="M4 4.5v5h5"/></symbol>
+  <symbol id="i-rotr" viewBox="0 0 24 24"><path d="M19.5 9.5A8 8 0 1 0 18 16.5"/><path d="M20 4.5v5h-5"/></symbol>
+  <symbol id="i-rot180" viewBox="0 0 24 24"><path d="M5 12a7 7 0 0 1 12-4.9L19 9M19 4.5V9h-4.5M19 12a7 7 0 0 1-12 4.9L5 15M5 19.5V15h4.5"/></symbol>
+  <symbol id="i-crop" viewBox="0 0 24 24"><path d="M6.5 3v13.5a1 1 0 0 0 1 1H21M3 6.5h13.5a1 1 0 0 1 1 1V21"/></symbol>
+  <symbol id="i-save" viewBox="0 0 24 24"><path d="M5 4.5h11l3 3V18a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 5 18z"/><path d="M8 4.5V9h7V4.5M8 19.5v-5h8v5"/></symbol>
+  <symbol id="i-history" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.4-5.7L4 8.5M4 4v4.5h4.5M12 8v4.5l3 2"/></symbol>
+  <symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M3 19.5c.5-3.3 3-5.5 6-5.5s5.5 2.2 6 5.5M16 4.8a3.5 3.5 0 0 1 0 6.4M18 14.2c1.6.8 2.7 2.6 3 5.3"/></symbol>
+  <symbol id="i-type" viewBox="0 0 24 24"><path d="M5 7V5h14v2M12 5v14M9 19h6"/></symbol>
+  <symbol id="i-split" viewBox="0 0 24 24"><path d="M12 3v6m0 0L5 15v5M12 9l7 6v5M12 9v11"/></symbol>
+  <symbol id="i-wand" viewBox="0 0 24 24"><path d="M4 20L15 9M13.5 5.5l1-2.5 1 2.5 2.5 1-2.5 1-1 2.5-1-2.5-2.5-1zM19 13l.6 1.4L21 15l-1.4.6L19 17l-.6-1.4L17 15l1.4-.6z"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12 4l9 4.5-9 4.5-9-4.5z"/><path d="M3 12.5L12 17l9-4.5M3 16.5L12 21l9-4.5"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.3-4.3"/></symbol>
+  <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-pr" viewBox="0 0 24 24"><circle cx="6" cy="5.5" r="2.2"/><circle cx="6" cy="18.5" r="2.2"/><circle cx="18" cy="18.5" r="2.2"/><path d="M6 7.7v8.6M18 16.3V9a3 3 0 0 0-3-3h-4m0 0l2.5-2.5M11 6l2.5 2.5"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="1.5"/><path d="M16 8V5.5A1.5 1.5 0 0 0 14.5 4h-9A1.5 1.5 0 0 0 4 5.5v9A1.5 1.5 0 0 0 5.5 16H8"/></symbol>
+</svg>
+
+<div class="app">
+<header class="topnav">
+  <a class="logo" href="#/"><img :src="isDark() ? '/static/img/logo-dark.png' : '/static/img/logo.png'" alt="MaDoc"></a>
+  <span class="brand-sub">MLOps</span>
+  <template x-for="n in nav" :key="n.id">
+    <a class="navlink" :href="'#/' + n.id" :class="{on: view === n.id}" :title="n.label">
+      <svg class="ic"><use :href="'#i-' + n.icon"/></svg><span class="navlabel" x-text="n.label"></span>
+      <span class="badge blue" x-show="n.id === 'jobs' && activeCount()" x-text="activeCount()"></span>
+    </a>
+  </template>
+  <span class="grow"></span>
+  <div class="segmented" role="radiogroup" aria-label="Theme">
+    <template x-for="m in ['light', 'dark', 'system']" :key="m">
+      <button class="btn icon" type="button" role="radio" :aria-checked="theme === m" :class="{on: theme === m}"
+              :title="m[0].toUpperCase() + m.slice(1)" :aria-label="m" @click="setTheme(m)">
+        <svg class="ic"><use :href="'#i-' + {light: 'sun', dark: 'moon', system: 'monitor'}[m]"/></svg>
+      </button>
+    </template>
+  </div>
+  <span class="small muted hide-s" x-text="meta ? meta.user : ''"></span>
+</header>
+
+<!-- ======================================================== pipeline (home) -->
+<section x-show="view === 'pipeline'" class="page wide">
+  <div class="page-head">
+    <h1>Pipeline</h1>
+    <span class="live"><span class="dot"></span><span>Live, every 5 s</span></span>
+    <span class="grow"></span>
+    <a class="btn" href="#/data"><svg class="ic"><use href="#i-upload"/></svg><span>Upload a batch</span></a>
+    <a class="btn primary" href="#/training"><svg class="ic"><use href="#i-play"/></svg><span>Train a model</span></a>
+  </div>
+  <template x-if="graph">
+    <div class="stack">
+      <div class="panel">
+        <div class="graph" x-html="graphSvg()" @click="graphClick($event)" @keydown.enter="graphClick($event)"></div>
+        <div class="legend">
+          <span><i></i>a stage feeds the next</span><span><i class="dash"></i>optional (augmentation)</span>
+          <span><i class="live"></i>a job runs on this stage</span>
+          <span><span class="dot green"></span>last job done</span><span><span class="dot red"></span>last job failed</span>
+          <span>click a stage to open it</span>
+        </div>
+      </div>
+      <div class="cols">
+        <div class="panel">
+          <div class="panel-head"><h2>Running and queued</h2><span class="badge" x-text="graph.active.length"></span><span class="grow"></span>
+            <a class="btn subtle" href="#/jobs">All jobs</a></div>
+          <table class="grid" x-show="graph.active.length">
+            <tbody><template x-for="j in graph.active" :key="j.id">
+              <tr class="clickable" @click="go('jobs/' + j.id)"><td class="mono" x-text="'#' + j.id"></td><td x-text="j.kind + (j.task ? ' ' + j.task : '')"></td>
+                <td><span class="lozenge" :class="lozenge(j.status)" x-text="j.status"></span></td>
+                <td class="num-cell muted" x-text="j.started ? since(j.started) : 'waiting'"></td></tr>
+            </template></tbody>
+          </table>
+          <div class="empty" x-show="!graph.active.length" style="padding:24px"><p>No job running: the GPU is free.</p></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Dataset now</h2><span class="grow"></span><span class="mono small muted" x-text="data ? data.digest : ''"></span></div>
+          <div class="tiles" style="padding:16px" x-show="data">
+            <template x-for="s in (data ? data.splits : [])" :key="s.split">
+              <div class="tile"><div class="k" x-text="s.split"></div><div class="v" x-text="s.pages"></div>
+                <div class="s" x-text="fmt(s.lines) + ' lines · ' + s.writers + ' writers'"></div></div>
+            </template>
+          </div>
+        </div>
+      </div>
+    </div>
+  </template>
+</section>
+
+<!-- ======================================================== data -->
+<section x-show="view === 'data'" class="page wide">
+  <div class="page-head"><h1>Data</h1><span class="mono small muted" x-text="data ? 'dataset ' + data.digest : ''"></span></div>
+  <div class="layout">
+    <nav class="sidenav">
+      <template x-for="s in dataSections" :key="s.id">
+        <a :href="'#/data/' + s.id" :class="{on: sub === s.id}"><svg class="ic"><use :href="'#i-' + s.icon"/></svg><span x-text="s.label"></span></a>
+      </template>
+    </nav>
+    <div class="stack" style="min-width:0">
+
+      <!-- overview -->
+      <template x-if="sub === 'overview' && data">
+        <div class="stack">
+          <div class="panel">
+            <div class="panel-head"><h2>Upload an eScriptorium export</h2></div>
+            <div class="drop" style="height:140px" :class="{over: dropping}" @dragover.prevent="dropping = true" @dragleave="dropping = false"
+                 @drop.prevent="dropping = false; pickZip($event.dataTransfer.files[0])">
+              <div class="hint-in">
+                <svg class="ic xl"><use href="#i-upload"/></svg>
+                <strong x-text="zip ? zip.name : 'Drop the zip here (PageXML with images)'"></strong>
+                <span class="small" x-text="zip ? (zip.size / 1048576).toFixed(1) + ' MB' : 'up to ' + data.max_upload_mb + ' MB'"></span>
+              </div>
+              <span class="spin" x-show="uploading"></span>
+            </div>
+            <div class="actions-row">
+              <label class="btn"><input type="file" accept=".zip" hidden @change="pickZip($event.target.files[0]); $event.target.value = ''">
+                <svg class="ic"><use href="#i-file"/></svg><span>Choose a zip</span></label>
+              <label class="toggle-row"><label class="switch"><input type="checkbox" x-model="heldOut"><span></span></label>
+                Held-out set <span class="muted">(always in test: never trained on, augmented or moved by a split)</span></label>
+              <span class="grow"></span>
+              <button class="btn primary" @click="uploadZip()" :disabled="!zip || uploading"><span class="spin" x-show="uploading"></span><span>Ingest</span></button>
+            </div>
+            <div class="indeterminate" x-show="uploading"></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Dataset now</h2><span class="muted small">split by writer: the officer named on page 2 of each act</span></div>
+            <div class="scroll-x"><table class="grid">
+              <thead><tr><th>Split</th><th class="end">Pages</th><th class="end">Page 1</th><th class="end">Page 2</th><th class="end">Writers</th>
+                <th class="end">No writer</th><th class="end">Held out</th><th class="end">Register-years</th><th class="end">Lines</th>
+                <th class="end">Characters</th><th class="end">Edited</th></tr></thead>
+              <tbody>
+                <template x-for="s in data.splits" :key="s.split">
+                  <tr><td><span class="lozenge" :class="{train: '', val: 'progress', test: 'moved'}[s.split]" x-text="s.split"></span></td>
+                    <template x-for="k in ['pages', 'page1', 'page2', 'writers', 'no_writer', 'held_out', 'groups', 'lines', 'characters', 'edited']" :key="k">
+                      <td class="num-cell" x-text="fmt(s[k])"></td></template></tr>
+                </template>
+                <tr><td><b>total</b></td><template x-for="k in ['pages', 'page1', 'page2', 'writers', 'no_writer', 'held_out', 'groups', 'lines', 'characters', 'edited']" :key="k">
+                  <td class="num-cell"><b x-text="fmt(data.total[k])"></b></td></template></tr>
+              </tbody>
+            </table></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Batches</h2><span class="badge" x-text="data.batches.length"></span>
+              <span class="muted small">Delete takes the pages out (restore brings them back); purge removes a deleted batch for good, only when no model used it.</span></div>
+            <div class="scroll-x"><table class="grid">
+              <thead><tr><th>Batch</th><th>Uploaded</th><th>Status</th><th class="end">Pages now</th><th class="end">Train / val / test at ingest</th>
+                <th class="end">Duplicates</th><th class="end">Rejected</th><th>Reasons</th><th></th></tr></thead>
+              <tbody>
+                <template x-for="b in data.batches" :key="b.id">
+                  <tr><td class="mono" x-text="'#' + b.id"></td><td class="muted" x-text="date(b.created)"></td>
+                    <td><span class="lozenge" :class="b.deleted || b.status === 'purged' ? 'removed' : (b.status === 'ingested' ? 'success' : (b.status === 'failed' ? 'removed' : 'progress'))"
+                              x-text="b.status + (b.deleted ? ' · deleted' : '')"></span>
+                      <span class="lozenge moved" x-show="b.held_out">held out</span></td>
+                    <td class="num-cell" x-text="b.pages"></td><td class="num-cell" x-text="b.added.train + ' / ' + b.added.val + ' / ' + b.added.test"></td>
+                    <td class="num-cell" x-text="b.duplicates"></td><td class="num-cell" x-text="b.rejected"></td>
+                    <td class="small muted wrap" x-text="Object.entries(b.reasons).map(([k, v]) => k + ': ' + v).join(', ')"></td>
+                    <td class="end">
+                      <button class="btn subtle compact" x-show="!b.deleted && b.status !== 'purged'" @click="batchAction(b, 'delete')">Delete</button>
+                      <button class="btn subtle compact" x-show="b.deleted" @click="batchAction(b, 'restore')">Restore</button>
+                      <button class="btn subtle compact danger" x-show="b.deleted" @click="batchAction(b, 'purge')">Purge</button></td></tr>
+                </template>
+              </tbody>
+            </table></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Dataset versions</h2><span class="muted small">made when a job needs one: the exact pages (and revisions) of a training</span></div>
+            <table class="grid">
+              <thead><tr><th>Version</th><th>Digest</th><th>Created</th><th class="end">Train</th><th class="end">Val</th><th class="end">Test</th><th class="end">Models</th><th class="end">Evaluations</th></tr></thead>
+              <tbody><template x-for="v in data.versions" :key="v.id">
+                <tr><td class="mono" x-text="'#' + v.id"></td><td class="mono"><span x-text="v.digest"></span>
+                  <span class="lozenge success" x-show="v.digest === data.digest">current</span></td>
+                  <td class="muted" x-text="date(v.created)"></td><td class="num-cell" x-text="v.counts.train"></td><td class="num-cell" x-text="v.counts.val"></td>
+                  <td class="num-cell" x-text="v.counts.test"></td><td class="num-cell" x-text="v.models"></td><td class="num-cell" x-text="v.evaluations"></td></tr>
+              </template></tbody>
+            </table>
+          </div>
+        </div>
+      </template>
+
+      <!-- vocabulary -->
+      <template x-if="sub === 'vocabulary'">
+        <div class="stack">
+          <div class="panel" x-show="vocab">
+            <div class="panel-head"><h2>Splits</h2><span class="grow"></span>
+              <span class="small muted" x-text="vocab ? vocab.coverage.in_all_splits + ' / ' + vocab.coverage.characters + ' characters in every split' : ''"></span></div>
+            <div class="scroll-x"><table class="grid" x-show="vocab">
+              <thead><tr><th>Split</th><th class="end">Characters</th><th class="end">Target</th>
+                <template x-for="(label, k) in (vocab ? vocab.type_labels : {})" :key="k"><th class="end" x-text="label"></th></template>
+                <th>Missing from this split</th></tr></thead>
+              <tbody><template x-for="s in (vocab ? vocab.splits : [])" :key="s">
+                <tr><td x-text="s"></td><td class="num-cell" x-text="pct(vocab.coverage.share[s])"></td><td class="num-cell muted" x-text="pct(vocab.targets[s], 0)"></td>
+                  <template x-for="(label, k) in vocab.type_labels" :key="k"><td class="num-cell" x-text="(vocab.types[s][k] || 0)"></td></template>
+                  <td class="wrap"><div class="chips"><template x-for="c in vocab.coverage.missing[s]" :key="c.code">
+                    <span class="chip" dir="auto" :title="c.code" x-text="c.shown"></span></template>
+                    <span class="muted small" x-show="!vocab.coverage.missing[s].length">none</span></div></td></tr>
+              </template></tbody>
+            </table></div>
+          </div>
+          <div class="panel" x-show="vocab">
+            <div class="panel-head"><h2>Characters</h2><span class="badge" x-text="vocabShown().length"></span>
+              <div class="segmented"><template x-for="s in ['all', 'train', 'val', 'test']" :key="s">
+                <button class="btn" :class="{on: vocabScope === s}" @click="vocabScope = s" x-text="s"></button></template></div>
+              <span class="grow"></span>
+              <span class="small muted" x-text="vocab ? 'red: fewer than ' + vocab.rare + ' · dashed: never in train' : ''"></span>
+              <button class="btn subtle icon" @click="copyText(vocab.tsv)" title="Copy as a table (tab-separated)" aria-label="Copy"><svg class="ic"><use href="#i-copy"/></svg></button>
+              <button class="btn subtle icon" @click="loadVocab()" title="Refresh" aria-label="Refresh"><svg class="ic"><use href="#i-refresh"/></svg></button>
+            </div>
+            <div class="section small muted" style="padding:12px 16px; border-bottom:1px solid var(--border)" x-show="vocabInvisible().length">
+              <b>Spaces and invisible characters:</b>
+              <template x-for="c in vocabInvisible()" :key="c.code"><span x-text="' ' + c.shown + ' ' + c.code + ' (' + fmt(c.n) + ')'"></span></template>
+            </div>
+            <div class="voc">
+              <template x-for="c in vocabShown()" :key="c.code">
+                <div class="voc-cell" :class="{rare: c.n < vocab.rare, notrain: !c.counts.train}"
+                     :title="c.name + ' (' + c.code + ') — ' + vocab.splits.map((s) => s + ' ' + c.counts[s]).join(' · ')">
+                  <span class="c" dir="auto" x-text="c.shown"></span><span class="n" x-text="fmt(c.n)"></span></div>
+              </template>
+            </div>
+          </div>
+          <div class="panel" x-show="!vocab"><div class="empty"><span class="spin"></span><p>Counting the characters of every page…</p></div></div>
+        </div>
+      </template>
+
+      <!-- writers -->
+      <template x-if="sub === 'writers'">
+        <div class="stack">
+          <div class="message warning" x-show="writers && writers.variants.length">
+            <svg class="ic l"><use href="#i-alert"/></svg>
+            <div><strong>Spellings that may be the same officer</strong>
+              <span>Merge them before splitting by writer, or the same hand may be in train and test.</span>
+              <ul style="margin:6px 0 0; padding-inline-start:18px"><template x-for="v in (writers ? writers.variants : [])" :key="v.a + v.b">
+                <li><span dir="auto" x-text="v.a"></span> (<span x-text="v.pages_a"></span>) / <span dir="auto" x-text="v.b"></span> (<span x-text="v.pages_b"></span>)</li></template></ul></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Writers</h2><span class="badge" x-text="writers ? writers.writers.length : 0"></span>
+              <span class="muted small">the officer read on page 2; page 1 takes the writer of its act. Names stay in this app: W&amp;B and the figures see the labels.</span></div>
+            <div class="scroll-x"><table class="grid" x-show="writers">
+              <thead><tr><th>Writer (private)</th><th>Label</th><th class="end">Pages</th><th class="end">Acts</th><th class="end">Page 1</th><th class="end">Page 2</th>
+                <th class="end">Acts missing a page</th><th>Splits</th><th class="end">Held out</th><th>Split chosen</th></tr></thead>
+              <tbody><template x-for="w in (writers ? writers.writers : [])" :key="w.label">
+                <tr><td dir="auto" x-text="w.writer"></td><td class="mono" x-text="w.label"></td><td class="num-cell" x-text="w.pages"></td><td class="num-cell" x-text="w.acts"></td>
+                  <td class="num-cell" x-text="w.page1"></td><td class="num-cell" x-text="w.page2"></td><td class="num-cell" x-text="w.incomplete_acts"></td>
+                  <td class="small" x-text="Object.entries(w.splits).map(([k, v]) => k + ' ' + v).join(', ')"></td><td class="num-cell" x-text="w.held_out"></td>
+                  <td class="cell" style="width:120px"><select :disabled="!w.known" @change="pinWriter(w, $event.target.value)" :aria-label="'Split of ' + w.label">
+                    <template x-for="s in ['auto', 'train', 'val', 'test']" :key="s"><option :value="s" :selected="w.pinned === s" x-text="s"></option></template></select></td></tr>
+              </template></tbody>
+            </table></div>
+            <div class="section small muted" style="padding:12px 16px; border-top:1px solid var(--border)">A chosen split stays at every split; the other writers are balanced around it. Then Split → Preview / Apply. To test on two writers: both in test, one in val.</div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Same officer, other spelling</h2></div>
+            <div class="fields">
+              <label class="field"><span>This spelling…</span><input type="text" dir="auto" list="writer-names" x-model="alias.variant"></label>
+              <label class="field"><span>…is the same officer as</span><input type="text" dir="auto" list="writer-names" x-model="alias.canonical"></label>
+              <datalist id="writer-names"><template x-for="n in (writers ? writers.names : [])" :key="n"><option :value="n"></option></template></datalist>
+            </div>
+            <div class="actions-row"><button class="btn primary" @click="addAlias()" :disabled="!alias.variant || !alias.canonical">Merge</button></div>
+            <table class="grid" x-show="writers && writers.aliases.length">
+              <thead><tr><th>Spelling</th><th>Same officer as</th><th></th></tr></thead>
+              <tbody><template x-for="a in (writers ? writers.aliases : [])" :key="a.variant">
+                <tr><td dir="auto" x-text="a.variant"></td><td dir="auto" x-text="a.canonical"></td>
+                  <td class="end"><button class="btn subtle compact" @click="removeAlias(a.variant)">Undo</button></td></tr></template></tbody>
+            </table>
+          </div>
+        </div>
+      </template>
+
+      <!-- split -->
+      <template x-if="sub === 'split' && splitForm">
+        <div class="stack">
+          <div class="panel">
+            <div class="panel-head"><h2>Split settings</h2><span class="muted small">Preview computes a split without changing anything; Apply saves the settings and splits again. Trainings already made keep their own dataset version.</span></div>
+            <div class="fields">
+              <label class="field"><span>Split by</span><select x-model="splitForm.split_by">
+                <option value="writer">writer (writer-independent test)</option><option value="group">register and year</option></select></label>
+              <label class="field"><span>Validation (% of the characters)</span><input type="number" min="1" max="50" step="0.5" x-model.number="splitForm.val"></label>
+              <label class="field"><span>Test (% of the characters)</span><input type="number" min="1" max="50" step="0.5" x-model.number="splitForm.test"></label>
+              <label class="field"><span>Tolerance (% of a split's share)</span><input type="number" min="0" max="100" x-model.number="splitForm.tolerance">
+                <span class="help">33: a 15 % split may hold 10 % to 20 %</span></label>
+              <label class="field"><span>Weight: a character missing from a split</span><input type="number" min="0" x-model.number="splitForm.missing">
+                <span class="help">× 3 when missing from train</span></label>
+              <label class="field"><span>Weight: page 1 (names) share</span><input type="number" min="0" x-model.number="splitForm.page1"></label>
+              <label class="field"><span>Weight: page 2 (details) share</span><input type="number" min="0" x-model.number="splitForm.page2"></label>
+            </div>
+            <div class="actions-row">
+              <button class="btn subtle" @click="splitAction('reset')">Reset to params.yaml</button>
+              <span class="grow"></span>
+              <button class="btn" @click="splitAction('preview')" :disabled="busyAction"><span class="spin" x-show="busyAction === 'preview'"></span><span>Preview</span></button>
+              <button class="btn primary" @click="splitAction('apply')" :disabled="busyAction"><span class="spin" x-show="busyAction === 'apply'"></span><span>Apply: save and split again</span></button>
+            </div>
+          </div>
+          <div class="panel" x-show="splitResult">
+            <div class="panel-head"><h2>Result</h2><span class="grow"></span><span class="lozenge" :class="splitResult && splitResult.applied ? 'success' : 'progress'" x-text="splitResult && splitResult.applied ? 'applied' : 'preview'"></span></div>
+            <template x-if="splitResult">
+              <div>
+                <div class="section" style="padding:12px 16px" x-text="splitResult.text"></div>
+                <table class="grid">
+                  <thead><tr><th>Split</th><th class="end">Pages</th><th class="end" x-text="splitResult.unit + 's'"></th><th class="end">Characters</th><th>Missing characters</th></tr></thead>
+                  <tbody><template x-for="s in ['train', 'val', 'test']" :key="s">
+                    <tr><td x-text="s"></td><td class="num-cell" x-text="splitResult.pages[s] || 0"></td><td class="num-cell" x-text="splitResult.units[s] || 0"></td>
+                      <td class="num-cell" x-text="pct(splitResult.share[s])"></td>
+                      <td><div class="chips"><template x-for="c in splitResult.missing[s]" :key="c"><span class="chip" dir="auto" x-text="c"></span></template>
+                        <span class="muted small" x-show="!splitResult.missing[s].length">none</span></div></td></tr></template></tbody>
+                </table>
+              </div>
+            </template>
+          </div>
+        </div>
+      </template>
+
+      <!-- normalisation -->
+      <template x-if="sub === 'normalization'">
+        <div class="stack">
+          <div class="panel">
+            <div class="panel-head"><h2>Rules</h2><span class="badge" x-text="rules.length"></span>
+              <span class="muted small">A text is replaced wherever it is found, inside a word too: check the preview before applying. In the logs a text rule is only its label (R-…).</span></div>
+            <table class="grid">
+              <thead><tr><th>Rule</th><th>Replaced</th><th>What</th><th>Replaced by</th><th>From</th><th></th></tr></thead>
+              <tbody><template x-for="r in rules" :key="r.rule">
+                <tr><td class="mono" x-text="r.rule"></td><td dir="auto" x-text="r.replaced"></td><td class="muted small" x-text="r.what"></td>
+                  <td dir="auto" x-text="r.replaced_by"></td><td class="muted small" x-text="r.source"></td>
+                  <td class="end"><button class="btn subtle icon compact" @click="ruleAction('remove', r.rule.startsWith('U+') ? r.rule : r.replaced)" title="Remove the rule" aria-label="Remove"><svg class="ic"><use href="#i-trash"/></svg></button></td></tr>
+              </template></tbody>
+            </table>
+            <div class="fields" style="border-top:1px solid var(--border)">
+              <label class="field"><span>Character or text</span><input type="text" dir="auto" x-model="rule.source" placeholder="ى, U+0649 or المصصفي عبادي">
+                <span class="help">a character, its code (U+…), or a word / several words</span></label>
+              <label class="field"><span>Replaced by</span><input type="text" dir="auto" x-model="rule.replacement" placeholder="ي or المصطفى عبادي; empty deletes">
+                <span class="help">text, or codes for invisible characters (U+0020 = a space)</span></label>
+            </div>
+            <div class="actions-row">
+              <button class="btn" @click="ruleAction('add', rule.source, rule.replacement)" :disabled="!rule.source">Add / change the rule</button>
+              <span class="grow"></span>
+              <button class="btn" @click="normalizePreview()" :disabled="busyAction"><span class="spin" x-show="busyAction === 'normalize'"></span><span>Preview</span></button>
+              <button class="btn primary" @click="post('/api/data/normalization/run', {}, 'Normalisation queued.')">Normalize the dataset</button>
+            </div>
+            <div class="section" style="padding:12px 16px; border-top:1px solid var(--border)" x-show="normPreview" x-text="normPreview"></div>
+          </div>
+          <p class="small muted">The rules apply to the next ingests and to the lines typed in the Editor. Normalize rewrites the pages already in (a backup of the old files is kept), reads the officer's name again and makes a new dataset version.</p>
+        </div>
+      </template>
+
+      <!-- augmentation -->
+      <template x-if="sub === 'augmentation' && aug">
+        <div class="stack">
+          <div class="panel">
+            <div class="panel-head"><h2>Augment the train pages</h2><span class="muted small">noise, lighting, shadow, blur, scribbles, rotation and perspective; the lines move with the image. Val, test and held-out pages stay real.</span></div>
+            <div class="fields">
+              <label class="field"><span>Copies of each train page</span><input type="number" min="1" max="10" x-model.number="augForm.copies"></label>
+              <label class="field"><span>Seed</span><input type="number" min="0" x-model.number="augForm.seed"></label>
+            </div>
+            <div class="actions-row"><span class="small muted" x-text="aug.train_pages + ' train pages in version ' + aug.digest"></span><span class="grow"></span>
+              <button class="btn primary" @click="post('/api/data/augmentation', augForm)">Augment</button></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Augmentations on disk</h2></div>
+            <table class="grid" x-show="aug.augmentations.length">
+              <thead><tr><th>Folder</th><th class="end">Pages</th><th class="end">Copies</th><th class="end">Seed</th><th>Dataset version</th></tr></thead>
+              <tbody><template x-for="a in aug.augmentations" :key="a.folder">
+                <tr><td class="mono" x-text="a.folder"></td><td class="num-cell" x-text="a.pages"></td><td class="num-cell" x-text="a.copies"></td><td class="num-cell" x-text="a.seed"></td>
+                  <td><span class="lozenge" :class="a.current ? 'success' : ''" x-text="a.current ? 'current: used by the trainings' : 'older: not used, replaced at the next augmentation'"></span></td></tr></template></tbody>
+            </table>
+            <div class="empty" x-show="!aug.augmentations.length" style="padding:24px"><p>No augmented pages yet.</p></div>
+          </div>
+        </div>
+      </template>
+
+      <!-- missing pages -->
+      <template x-if="sub === 'missing'">
+        <div class="panel">
+          <div class="panel-head"><h2>Acts with one of their two pages annotated</h2><span class="grow"></span>
+            <a class="btn" href="/api/data/missing/download"><svg class="ic"><use href="#i-download"/></svg><span>Pages to annotate (text file)</span></a></div>
+          <table class="grid" x-show="missingRows.length">
+            <thead><tr><th>Register</th><th>Split</th><th class="end">Complete acts</th><th class="end">Missing page 1</th><th class="end">Missing page 2</th></tr></thead>
+            <tbody><template x-for="r in missingRows" :key="r.register">
+              <tr><td class="mono" x-text="r.register"></td><td x-text="r.split"></td><td class="num-cell" x-text="r.complete"></td><td class="num-cell" x-text="r.missing1"></td><td class="num-cell" x-text="r.missing2"></td></tr></template></tbody>
+          </table>
+          <div class="empty" x-show="!missingRows.length"><p>Every act has both pages.</p></div>
+        </div>
+      </template>
+
+      <!-- preview -->
+      <template x-if="sub === 'preview'">
+        <div class="stack">
+          <div class="message warning"><svg class="ic l"><use href="#i-alert"/></svg>
+            <div><strong>Contains personal data</strong>Every line cut out along its polygon, shuffled within its split, with its transcription. It is not anonymised: names, dates and handwriting stay. Only an admin can download it, and every download is recorded.</div></div>
+          <div class="panel">
+            <div class="panel-head"><h2>Preview of the dataset as line images</h2></div>
+            <div class="actions-row" style="border-top:0">
+              <span x-text="previewInfo && previewInfo.latest ? 'Latest: ' + previewInfo.latest.name + ' (' + previewInfo.latest.mb + ' MB)' : 'No preview made yet.'"></span>
+              <span class="grow"></span>
+              <button class="btn" @click="post('/api/data/preview', {})">Make the preview zip</button>
+              <a class="btn primary" :class="{disabled: !(previewInfo && previewInfo.admin && previewInfo.latest)}" href="/api/data/preview/download"
+                 :title="previewInfo && !previewInfo.admin ? 'Admins only (MLOPS_ADMINS)' : ''"><svg class="ic"><use href="#i-download"/></svg><span>Download (admin)</span></a>
+            </div>
+          </div>
+        </div>
+      </template>
+    </div>
+  </div>
+</section>
+
+<!-- ======================================================== editor -->
+<section x-show="view === 'editor'" class="page" style="max-width:none">
+  <div class="editor">
+    <div class="panel list-panel">
+      <div class="panel-head"><h2>Pages</h2><span class="badge" x-text="pageList.length"></span></div>
+      <div class="filters">
+        <div class="segmented" style="flex-wrap:wrap">
+          <template x-for="s in ['train', 'val', 'test', 'augmented']" :key="s">
+            <button class="btn" :class="{on: ef.split === s}" @click="ef.split = s; loadPages()" x-text="s === 'augmented' ? 'aug.' : s"></button></template>
+        </div>
+        <select x-model="ef.type" @change="loadPages()" aria-label="Page type">
+          <template x-for="t in (meta ? meta.page_types : [])" :key="t.value"><option :value="t.value" x-text="t.label"></option></template></select>
+        <input type="search" x-model="ef.search" @keydown.enter="loadPages()" @search="loadPages()" :placeholder="ef.names ? 'Search an id or an original name' : 'Search an id'">
+        <label class="toggle-row"><label class="switch"><input type="checkbox" x-model="ef.names" @change="loadPages(); if (page) openPage(page.key || page.id, true)"><span></span></label>Original names</label>
+        <label class="toggle-row"><label class="switch"><input type="checkbox" x-model="ef.edited" @change="loadPages()"><span></span></label>Edited pages only</label>
+        <span class="small muted" x-text="pageNote"></span>
+      </div>
+      <div class="scrollable">
+        <template x-for="p in pageList" :key="p.key">
+          <div class="page-row" :class="{on: page && (page.key || page.id) === p.key}" @click="openPage(p.key)">
+            <div style="min-width:0; flex:1"><div class="id" x-text="p.id"></div><div class="name" dir="auto" x-show="p.name" x-text="p.name"></div></div>
+            <span class="small muted" x-text="p.lines === null ? '' : p.lines + ' l.'"></span>
+            <span class="lozenge progress" x-show="p.revision" x-text="'r' + p.revision"></span>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <template x-if="page"><div class="row" style="min-width:0">
+          <strong class="mono" x-text="page.id"></strong>
+          <span class="lozenge" x-text="page.split"></span>
+          <span class="lozenge progress" x-show="!page.readonly" x-text="'revision ' + page.revision"></span>
+          <span class="lozenge moved" x-show="page.readonly">read only</span>
+          <span class="small muted" dir="auto" x-show="page.name" x-text="page.name"></span>
+        </div></template>
+        <span class="muted" x-show="!page">Choose a page</span>
+        <span class="grow"></span>
+        <template x-if="page && !page.readonly">
+          <div class="toolbar">
+            <div class="segmented">
+              <button class="btn icon" :class="{on: mode === 'select'}" @click="setMode('select')" title="Select and move (double-click an edge: add a point; a point: remove it)" aria-label="Select"><svg class="ic"><use href="#i-cursor"/></svg></button>
+              <button class="btn icon" :class="{on: mode === 'draw'}" @click="setMode('draw')" title="Draw a missing line" aria-label="Draw"><svg class="ic"><use href="#i-pen"/></svg></button>
+              <button class="btn icon" :class="{on: mode === 'crop'}" @click="setMode('crop')" :disabled="dirty || !!lock()" title="Crop the image (drag a box; saved at once)" aria-label="Crop"><svg class="ic"><use href="#i-crop"/></svg></button>
+            </div>
+            <button class="btn subtle icon" @click="boxLine()" :disabled="!selected" title="Make the selected line a rectangle" aria-label="Rectangle"><svg class="ic"><use href="#i-box"/></svg></button>
+            <button class="btn subtle icon" @click="deleteLine()" :disabled="!selected" title="Delete the selected line (Delete)" aria-label="Delete"><svg class="ic"><use href="#i-trash"/></svg></button>
+            <button class="btn subtle icon" @click="undoEdit()" :disabled="!canUndo" title="Undo (Ctrl+Z)" aria-label="Undo"><svg class="ic"><use href="#i-undo"/></svg></button>
+            <span class="divider"></span>
+            <button class="btn subtle icon" @click="transform({op: 'rotate', degrees: 270})" :disabled="dirty || saving || !!lock()" title="Rotate left (saved at once)" aria-label="Rotate left"><svg class="ic"><use href="#i-rotl"/></svg></button>
+            <button class="btn subtle icon" @click="transform({op: 'rotate', degrees: 90})" :disabled="dirty || saving || !!lock()" title="Rotate right (saved at once)" aria-label="Rotate right"><svg class="ic"><use href="#i-rotr"/></svg></button>
+            <button class="btn subtle icon" @click="transform({op: 'rotate', degrees: 180})" :disabled="dirty || saving" title="Turn upside down (saved at once)" aria-label="Rotate 180"><svg class="ic"><use href="#i-rot180"/></svg></button>
+            <span class="divider"></span>
+          </div>
+        </template>
+        <button class="btn subtle icon" @click="zoom(-1)" title="Zoom out" aria-label="Zoom out"><svg class="ic"><use href="#i-zoom-out"/></svg></button>
+        <button class="btn subtle icon" @click="zoom(1)" title="Zoom in" aria-label="Zoom in"><svg class="ic"><use href="#i-zoom-in"/></svg></button>
+        <template x-if="page && !page.readonly">
+          <div class="row">
+            <button class="btn subtle" @click="discard()" :disabled="!dirty || saving">Discard</button>
+            <button class="btn primary" @click="saveLines()" :disabled="!dirty || saving || !!lock()" title="Save (Ctrl+S)">
+              <span class="spin" x-show="saving"></span><svg class="ic" x-show="!saving"><use href="#i-save"/></svg><span>Save</span></button>
+          </div>
+        </template>
+      </div>
+      <div class="indeterminate" x-show="saving"></div>
+      <div class="message warning" style="margin:8px; border-radius:var(--radius-s)" x-show="page && !page.readonly && lock()">
+        <svg class="ic l"><use href="#i-alert"/></svg><div x-text="lock()"></div></div>
+      <div class="canvas" x-ref="canvas"></div>
+      <div class="statusbar" style="position:static">
+        <span x-show="page"><b x-text="page ? page.width + ' × ' + page.height + ' px' : ''"></b></span>
+        <span x-show="page"><b x-text="editLines.length + ' lines'"></b></span>
+        <span x-show="dirty"><span class="dot red"></span><b>Unsaved changes</b></span>
+        <span x-show="page && page.writer"><span>Writer</span><b class="mono" x-text="page ? page.writer : ''"></b></span>
+        <span class="grow"></span>
+        <span class="hide-s">Delete: Delete key · Undo: Ctrl+Z · Save: Ctrl+S</span>
+      </div>
+    </div>
+
+    <div class="panel side-panel">
+      <div class="tabbar" role="tablist">
+        <button class="tab" :class="{on: sideTab === 'lines'}" @click="sideTab = 'lines'">Lines <span class="badge" x-text="editLines.length"></span></button>
+        <button class="tab" :class="{on: sideTab === 'history'}" @click="sideTab = 'history'" x-show="page && !page.readonly">History <span class="badge" x-text="page ? page.history.length : 0"></span></button>
+        <span class="grow"></span>
+        <a class="btn subtle compact" style="align-self:center" x-show="page" :href="page ? '/api/pages/' + encodeURIComponent(page.key || page.id) + '/xml' : '#'">PageXML</a>
+      </div>
+      <div class="scrollable">
+        <table class="grid" x-show="sideTab === 'lines'">
+          <tbody><template x-for="(l, i) in editLines" :key="l.id">
+            <tr :class="{sel: selected === l.id}" @mouseenter="hover(l.id)" @mouseleave="hover(null)">
+              <td class="num" x-text="i + 1"></td>
+              <td class="cell"><input type="text" dir="auto" :value="l.text" :readonly="page && page.readonly" :id="'line-' + l.id" :aria-label="'Line ' + (i + 1)"
+                       @focus="select(l.id, true)" @input="setText(l.id, $event.target.value)" @keydown.enter="$event.target.blur()"></td>
+            </tr></template></tbody>
+        </table>
+        <div class="empty" x-show="sideTab === 'lines' && page && !editLines.length"><p>No line: draw one on the page.</p></div>
+        <ul class="plain history" x-show="sideTab === 'history' && page">
+          <template x-for="h in (page ? page.history : [])" :key="h.revision">
+            <li><span class="rev" x-text="'r' + h.revision"></span>
+              <div style="flex:1; min-width:0"><div><b x-text="h.action"></b> <span class="muted" x-text="h.note || ''"></span></div>
+                <div class="small muted" x-text="date(h.created_at) + (h.username ? ' · ' + h.username : '') + ' · ' + h.lines + ' lines'"></div></div>
+              <span class="lozenge success" x-show="h.revision === page.revision">now</span>
+              <button class="btn compact" x-show="h.revision !== page.revision" @click="restoreRevision(h.revision)" :disabled="dirty || saving || !!lock()">Restore</button></li>
+          </template>
+          <li x-show="page && !page.history.length"><span class="muted small">Never edited: the first save keeps the page as ingested (r0), to restore at any time.</span></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================================================== training -->
+<section x-show="view === 'training'" class="page wide">
+  <div class="page-head"><h1>Training</h1>
+    <p class="lede small">Fine-tunes a model of MaDoc's repository on the current dataset, logged live in W&amp;B. What you change is saved for the next trainings (Reset: params.yaml); every job keeps the exact options it ran with.</p></div>
+  <template x-if="trainForm">
+    <div class="stack">
+      <div class="cols">
+        <template x-for="task in ['blla', 'htr']" :key="task">
+          <div class="panel">
+            <div class="panel-head"><h2 x-text="trainForm[task].name"></h2></div>
+            <div class="fields">
+              <template x-for="f in trainForm[task].fields" :key="f.key">
+                <div :class="f.kind === 'bool' ? 'field check' : (f.key === 'extra_args' || f.key === 'start_from' ? 'field wide' : 'field')">
+                  <template x-if="f.kind === 'bool'">
+                    <label class="toggle-row" style="align-items:flex-start"><label class="switch"><input type="checkbox" x-model="f.value"><span></span></label>
+                      <span><span style="font-weight:500; color:var(--text)" x-text="f.label"></span><span class="help" style="display:block" x-text="f.help"></span></span></label>
+                  </template>
+                  <template x-if="f.kind !== 'bool'">
+                    <label class="field">
+                      <span x-text="f.label"></span>
+                      <template x-if="f.choices && !f.free"><select x-model="f.value"><option value="">(kraken's default)</option>
+                        <template x-for="c in f.choices" :key="c"><option :value="c" :selected="c === f.value" x-text="c"></option></template></select></template>
+                      <template x-if="f.free"><input type="text" :list="'models-' + task" x-model="f.value"></template>
+                      <template x-if="!f.choices"><input :type="f.kind === 'int' ? 'number' : 'text'" x-model="f.value"
+                               :placeholder="f.kind === 'float' ? 'e.g. 1e-4' : (f.key === 'extra_args' ? '--warmup 200' : '')"></template>
+                      <span class="help" x-text="f.help"></span>
+                    </label>
+                  </template>
+                </div>
+              </template>
+              <datalist :id="'models-' + task"><template x-for="c in (trainForm[task].fields.find((f) => f.key === 'start_from') || {choices: []}).choices" :key="c"><option :value="c"></option></template></datalist>
+            </div>
+            <div class="actions-row"><button class="btn subtle" @click="resetTraining(task)">Reset</button><span class="grow"></span>
+              <button class="btn primary" @click="train(task)"><svg class="ic"><use href="#i-play"/></svg><span x-text="'Train ' + task"></span></button></div>
+          </div>
+        </template>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>Models</h2><span class="badge" x-text="models.length"></span><span class="muted small">click a model for its figures</span></div>
+        <div class="scroll-x"><table class="grid">
+          <thead><tr><th>Model</th><th>Task</th><th>Status</th><th>W&amp;B artifact</th><th>Dataset version</th><th>Validation</th><th>Created</th></tr></thead>
+          <tbody><template x-for="m in models" :key="m.id">
+            <tr class="clickable" :class="{sel: modelFigures && modelFigures.id === m.id}" @click="showModel(m)">
+              <td class="mono" x-text="'#' + m.id"></td><td x-text="m.task"></td>
+              <td><span class="lozenge" :class="{candidate: '', proposed: 'success', rejected: 'removed'}[m.status]" x-text="m.status"></span></td>
+              <td class="mono small" x-text="m.artifact || '—'"></td><td class="mono small" x-text="m.digest || '—'"></td>
+              <td class="small" x-text="metricsText(m.validation)"></td><td class="muted" x-text="date(m.created)"></td></tr></template></tbody>
+        </table></div>
+      </div>
+      <div class="panel" x-show="modelFigures">
+        <div class="panel-head"><h2 x-text="modelFigures ? 'Figures of model #' + modelFigures.id : ''"></h2><span class="grow"></span>
+          <button class="btn subtle icon" @click="modelFigures = null" aria-label="Close"><svg class="ic"><use href="#i-x"/></svg></button></div>
+        <div @click="zoomFigure($event)" x-html="figuresHtml(modelFigures, 'model')"></div>
+      </div>
+    </div>
+  </template>
+</section>
+
+<!-- ======================================================== evaluation -->
+<section x-show="view === 'evaluation'" class="page wide">
+  <div class="page-head"><h1>Evaluation and release</h1>
+    <p class="lede small">The candidate and the production model on the same test pages; every number with its 95 % interval (by writer). A candidate that passes the gate can be proposed to MaDoc as a pull request.</p></div>
+  <template x-if="evalPage">
+    <div class="stack">
+      <div class="cols">
+        <div class="panel">
+          <div class="panel-head"><h2>Evaluate a candidate</h2></div>
+          <div class="fields"><label class="field wide"><span>Candidate model</span><select x-model="evalForm.model">
+            <option value="">Choose a model</option>
+            <template x-for="m in evalPage.models" :key="m.id"><option :value="m.id" x-text="'#' + m.id + ' ' + m.task + ' ' + (m.artifact || '') + ' (' + m.status + ')'"></option></template></select></label></div>
+          <div class="actions-row"><span class="grow"></span><button class="btn primary" @click="post('/api/evaluate', {model_id: Number(evalForm.model)})" :disabled="!evalForm.model">Evaluate against production</button></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>Full pipeline (page 2)</h2><span class="muted small">segmentation + recognition, as MaDoc runs them; the result goes to Experiments</span></div>
+          <div class="fields">
+            <label class="field"><span>Segmentation</span><select x-model="evalForm.seg"><template x-for="o in evalPage.options.blla" :key="o.value"><option :value="o.value" x-text="o.label"></option></template></select></label>
+            <label class="field"><span>Recognition</span><select x-model="evalForm.rec"><template x-for="o in evalPage.options.htr" :key="o.value"><option :value="o.value" x-text="o.label"></option></template></select></label>
+          </div>
+          <div class="actions-row"><span class="grow"></span><button class="btn primary" @click="post('/api/evaluate/pipeline', {segmentation: evalForm.seg, recognition: evalForm.rec})">Evaluate the pipeline</button></div>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h2>Evaluations</h2><span class="badge" x-text="evalPage.evaluations.length"></span></div>
+        <div class="scroll-x"><table class="grid">
+          <thead><tr><th>Evaluation</th><th>Task</th><th>Candidate</th><th>Verdict</th><th class="end">Gain [95 % CI]</th><th class="end">Pages</th><th>Pull request</th><th>Created</th></tr></thead>
+          <tbody><template x-for="e in evalPage.evaluations" :key="e.id">
+            <tr class="clickable" :class="{sel: evaluation && evaluation.id === e.id}" @click="go('evaluation/' + e.id)">
+              <td class="mono" x-text="'#' + e.id"></td><td x-text="e.task"></td><td class="mono small" x-text="'#' + e.model_id + ' ' + (e.artifact || '')"></td>
+              <td><span class="lozenge" :class="e.passed ? 'success' : 'removed'" x-text="e.passed ? 'better' : 'not better'"></span></td>
+              <td class="num-cell"><span x-text="signed(e.gain)"></span> <span class="ci" x-text="'[' + signed(e.low) + ', ' + signed(e.high) + ']'"></span></td>
+              <td class="num-cell" x-text="e.pages"></td>
+              <td><a x-show="e.pr_url" :href="e.pr_url" target="_blank" rel="noopener" @click.stop>open</a></td><td class="muted" x-text="date(e.created)"></td></tr></template></tbody>
+        </table></div>
+      </div>
+      <template x-if="evaluation">
+        <div class="panel">
+          <div class="panel-head">
+            <h2 x-text="'Evaluation #' + evaluation.id + ': ' + evaluation.task_name"></h2>
+            <span class="lozenge" :class="evaluation.passed ? 'success' : 'removed'" x-text="evaluation.passed ? 'better' : 'not better'"></span>
+            <span class="grow"></span>
+            <a class="btn" x-show="evaluation.pr_url" :href="evaluation.pr_url" target="_blank" rel="noopener"><svg class="ic"><use href="#i-pr"/></svg><span>Pull request</span></a>
+            <template x-if="!evaluation.pr_url">
+              <div class="row">
+                <label class="toggle-row" x-show="!evaluation.passed"><input type="checkbox" x-model="override"> Open anyway</label>
+                <button class="btn brand" @click="release()" :disabled="!evaluation.passed && !override"><svg class="ic"><use href="#i-pr"/></svg><span>Open a pull request on MaDoc</span></button>
+              </div>
+            </template>
+          </div>
+          <div class="section" style="padding:12px 16px" x-text="evaluation.message"></div>
+          <div class="cols" style="padding:0 16px 16px">
+            <table class="grid lined">
+              <thead><tr><th>Metric</th><th class="end">Production [CI]</th><th class="end">Candidate [CI]</th></tr></thead>
+              <tbody><template x-for="m in evaluation.metrics" :key="m.key">
+                <tr><td class="mono small" x-text="m.key"></td>
+                  <td class="num-cell"><span x-text="num(m.production)"></span> <span class="ci" x-show="m.production_ci" x-text="ci(m.production_ci)"></span></td>
+                  <td class="num-cell"><span x-text="num(m.candidate)"></span> <span class="ci" x-show="m.candidate_ci" x-text="ci(m.candidate_ci)"></span></td></tr></template></tbody>
+            </table>
+            <dl class="kv panel" style="margin:0">
+              <dt>Gate</dt><dd><b x-text="signed(evaluation.comparison.gain)"></b> mean gain per page on <span x-text="evaluation.comparison.metric"></span>,
+                <span x-text="Math.round(100 * (evaluation.comparison.confidence || 0.95)) + ' % CI ' + ci([evaluation.comparison.low, evaluation.comparison.high], true)"></span></dd>
+              <dt>Test pages</dt><dd x-text="evaluation.comparison.pages + ' (intervals ' + evaluation.comparison.interval + ')'"></dd>
+              <dt x-show="Object.keys(evaluation.comparison.subsets).length">Old / new pages</dt>
+              <dd x-show="Object.keys(evaluation.comparison.subsets).length" x-text="Object.entries(evaluation.comparison.subsets).map(([k, v]) => (k === 'old' ? 'seen by production: ' : 'added since: ') + v.pages + ' pages, gain ' + signed(v.gain)).join('; ')"></dd>
+              <dt x-show="Object.keys(evaluation.comparison.groups).length" x-text="'By ' + evaluation.comparison.unit"></dt>
+              <dd x-show="Object.keys(evaluation.comparison.groups).length" x-text="Object.values(evaluation.comparison.groups).map((v) => signed(v.gain) + ' on ' + v.pages).join(', ')"></dd>
+              <dt x-show="Object.keys(evaluation.comparison.excluded).length">Left out</dt>
+              <dd x-show="Object.keys(evaluation.comparison.excluded).length" x-text="Object.entries(evaluation.comparison.excluded).map(([k, v]) => v + ' seen in training by the ' + k).join(', ')"></dd>
+              <dt x-show="Object.keys(evaluation.comparison.wandb).length">W&amp;B</dt>
+              <dd x-show="Object.keys(evaluation.comparison.wandb).length"><template x-for="(url, k) in evaluation.comparison.wandb" :key="k"><a :href="url" target="_blank" rel="noopener" x-text="k + ' run '" style="margin-inline-end:8px"></a></template></dd>
+            </dl>
+          </div>
+          <div @click="zoomFigure($event)" x-html="figuresHtml(evaluation, 'evaluation')"></div>
+        </div>
+      </template>
+    </div>
+  </template>
+</section>
+
+<!-- ======================================================== experiments -->
+<section x-show="view === 'experiments'" class="page wide">
+  <div class="page-head"><h1>Experiments</h1>
+    <p class="lede small">A recognizer trained and tested on writers it never saw (one fold per writer), or on the dataset's split: Kraken (the HTR options of Training), a CRNN, a TrOCR-style model or Qwen2.5-VL-3B, on the same line images, scored by the same code.</p></div>
+  <div class="stack">
+    <div class="panel">
+      <div class="panel-head"><h2>Run an experiment</h2></div>
+      <div class="fields">
+        <label class="field"><span>Recognizer</span><select x-model="xf.recognizer"><option value="kraken">Kraken</option><option value="crnn">CRNN</option>
+          <option value="trocr">TrOCR-style</option><option value="qwen">Qwen2.5-VL-3B (LoRA)</option></select></label>
+        <label class="field"><span>Pages</span><select x-model="xf.scheme"><option value="writers">cross-validation by writer</option><option value="split">the dataset's split</option></select></label>
+        <label class="field"><span>Seeds</span><input type="text" x-model="xf.seeds" placeholder="1,2,3"><span class="help">several: every fold trained once per seed, mean ± sd</span></label>
+        <label class="field wide"><span>Options (JSON)</span><input type="text" class="mono" x-model="xf.options" placeholder='kraken: {"lag": 10}; crnn: {"epochs": 100}; qwen: {"epochs": 2}'></label>
+        <label class="field check" x-show="xf.recognizer === 'kraken'"><input type="checkbox" x-model="xf.segmentation"><span>Also train the segmentation per fold (end to end, page 2)</span></label>
+      </div>
+      <div class="actions-row"><span class="grow"></span><button class="btn primary" @click="runExperiment()"><svg class="ic"><use href="#i-play"/></svg><span>Run</span></button></div>
+    </div>
+    <div class="panel">
+      <div class="panel-head"><h2>Results</h2><span class="badge" x-text="experimentsList.length"></span></div>
+      <div class="scroll-x"><table class="grid">
+        <thead><tr><th>Experiment</th><th>Kind</th><th>Name</th><th class="end">CER % [CI]</th><th class="end">CER no spaces/punct. %</th><th class="end">WER %</th>
+          <th class="end">Names exact %</th><th class="end">End-to-end CER %</th><th class="end">Writers</th><th class="end">Folds</th><th>Created</th></tr></thead>
+        <tbody><template x-for="x in experimentsList" :key="x.id">
+          <tr class="clickable" :class="{sel: experimentDetail && experimentDetail.id === x.id}" @click="go('experiments/' + x.id)">
+            <td class="mono" x-text="'#' + x.id"></td><td x-text="x.kind"></td><td x-text="x.name"></td>
+            <template x-for="k in ['cer', 'cer_lp', 'wer']" :key="k"><td class="num-cell"><span x-text="x.metrics[k] ? num(x.metrics[k].value, 2) : ''"></span>
+              <span class="ci" x-show="x.metrics[k] && x.metrics[k].ci" x-text="x.metrics[k] ? ci(x.metrics[k].ci) : ''"></span>
+              <span class="ci" x-show="x.metrics[k] && x.metrics[k].sd" x-text="x.metrics[k] && x.metrics[k].sd ? '± ' + num(x.metrics[k].sd, 2) : ''"></span></td></template>
+            <td class="num-cell" x-text="x.names_exact ?? ''"></td><td class="num-cell" x-text="x.e2e_cer === null || x.e2e_cer === undefined ? '' : num(x.e2e_cer, 2)"></td>
+            <td class="num-cell" x-text="x.writers ?? ''"></td><td class="num-cell" x-text="x.folds ?? ''"></td><td class="muted" x-text="date(x.created)"></td></tr></template></tbody>
+      </table></div>
+    </div>
+    <template x-if="experimentDetail">
+      <div class="panel">
+        <div class="panel-head"><h2 x-text="experimentDetail.name"></h2><span class="lozenge" x-text="experimentDetail.kind"></span>
+          <span class="small muted" x-text="experimentDetail.pages + ' test pages, ' + fmt(experimentDetail.lines) + ' lines, ' + fmt(experimentDetail.chars) + ' characters; intervals ' + experimentDetail.interval + ' (' + experimentDetail.writers + ' writers)'"></span></div>
+        <div class="cols" style="padding:16px">
+          <table class="grid lined">
+            <thead><tr><th>Metric</th><th class="end">Value</th><th class="end">95 % interval</th><th class="end">Mean ± sd over seeds</th></tr></thead>
+            <tbody><template x-for="m in experimentDetail.metrics" :key="m.key"><tr><td class="mono small" x-text="m.key"></td><td class="num-cell" x-text="num(m.value)"></td>
+              <td class="num-cell ci" x-text="m.ci ? ci(m.ci) : ''"></td><td class="num-cell" x-text="m.spread ? num(m.spread.mean) + ' ± ' + num(m.spread.sd) : ''"></td></tr></template></tbody>
+          </table>
+          <div class="stack">
+            <table class="grid lined" x-show="experimentDetail.names.length">
+              <thead><tr><th>Names (field | page)</th><th class="end">Names</th><th class="end">Exact %</th><th class="end">Normalised %</th><th class="end">CER %</th></tr></thead>
+              <tbody><template x-for="n in experimentDetail.names" :key="n.key"><tr><td class="small" x-text="n.key"></td><td class="num-cell" x-text="n.names"></td>
+                <td class="num-cell" x-text="n.exact"></td><td class="num-cell" x-text="n.normalized"></td><td class="num-cell" x-text="n.cer"></td></tr></template></tbody>
+            </table>
+            <div class="message info" x-show="experimentDetail.pipeline"><svg class="ic l"><use href="#i-flow"/></svg>
+              <div x-text="experimentDetail.pipeline ? 'End to end (page 2): CER ' + num(experimentDetail.pipeline.e2e_cer) + ' % (true lines ' + num(experimentDetail.pipeline.gt_cer) + ' %), line precision ' + num(experimentDetail.pipeline.precision, 3) + ', recall ' + num(experimentDetail.pipeline.recall, 3) : ''"></div></div>
+            <table class="grid" x-show="experimentDetail.folds.length">
+              <thead><tr><th>Fold</th><th>Writers</th><th class="end">Test</th><th class="end">Train</th><th class="end">Val</th></tr></thead>
+              <tbody><template x-for="f in experimentDetail.folds" :key="f.name"><tr><td x-text="f.name"></td><td class="mono small" x-text="(f.writers || []).join(', ')"></td>
+                <td class="num-cell" x-text="f.test"></td><td class="num-cell" x-text="f.train"></td><td class="num-cell" x-text="f.val"></td></tr></template></tbody>
+            </table>
+          </div>
+        </div>
+        <div @click="zoomFigure($event)" x-html="figuresHtml(experimentDetail, 'experiment')"></div>
+      </div>
+    </template>
+  </div>
+</section>
+
+<!-- ======================================================== jobs -->
+<section x-show="view === 'jobs'" class="page wide">
+  <div class="page-head"><h1>Jobs</h1>
+    <span class="lozenge moved" x-show="jobsData && jobsData.paused">worker paused (a deployment waits for the running job)</span>
+    <template x-for="w in (jobsData ? jobsData.workers : [])" :key="w.name">
+      <span class="lozenge" :class="w.alive ? 'success' : 'removed'" :title="'seen ' + w.age + ' s ago'" x-text="w.name + (w.alive ? (w.job_id ? ' · job ' + w.job_id : ' · idle') : ' · not seen')"></span></template>
+    <span class="grow"></span>
+    <div class="segmented"><template x-for="s in ['', 'running', 'queued', 'failed', 'done']" :key="s">
+      <button class="btn" :class="{on: jf.status === s}" @click="jf.status = s; loadJobs()" x-text="s || 'all'"></button></template></div>
+    <select style="width:auto" x-model="jf.kind" @change="loadJobs()" aria-label="Kind"><option value="">every kind</option>
+      <template x-for="k in (jobsData ? jobsData.kinds : [])" :key="k"><option :value="k" x-text="k"></option></template></select>
+  </div>
+  <div class="cols" style="grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr)">
+    <div class="panel">
+      <div class="scroll-x"><table class="grid">
+        <thead><tr><th>Job</th><th>Kind</th><th>Status</th><th>Created</th><th class="end">Duration</th><th>W&amp;B</th></tr></thead>
+        <tbody><template x-for="j in (jobsData ? jobsData.jobs : [])" :key="j.id">
+          <tr class="clickable" :class="{sel: jobDetail && jobDetail.id === j.id}" @click="go('jobs/' + j.id)">
+            <td class="mono" x-text="'#' + j.id"></td><td><span x-text="j.kind + (j.task ? ' ' + j.task : '')"></span><span class="muted small" x-show="j.queue !== 'kraken'" x-text="' · ' + j.queue"></span></td>
+            <td><span class="lozenge" :class="lozenge(j.status)" x-text="j.status"></span></td><td class="muted" x-text="date(j.created)"></td>
+            <td class="num-cell" x-text="j.seconds === null ? '' : duration(j.seconds)"></td>
+            <td><a x-show="j.wandb" :href="j.wandb" target="_blank" rel="noopener" @click.stop>run</a></td></tr></template></tbody>
+      </table></div>
+      <div class="empty" x-show="jobsData && !jobsData.jobs.length"><p>No job.</p></div>
+    </div>
+    <div class="panel" style="position:sticky; top:72px">
+      <template x-if="jobDetail">
+        <div>
+          <div class="panel-head"><h2 x-text="'Job #' + jobDetail.id + ' · ' + jobDetail.kind + (jobDetail.task ? ' ' + jobDetail.task : '')"></h2>
+            <span class="lozenge" :class="lozenge(jobDetail.status)" x-text="jobDetail.status"></span><span class="grow"></span>
+            <button class="btn danger" x-show="jobDetail.status === 'queued' || jobDetail.status === 'running'" @click="cancelJob(jobDetail.id)"><svg class="ic"><use href="#i-stop"/></svg><span>Cancel</span></button></div>
+          <dl class="kv">
+            <dt>Created</dt><dd x-text="date(jobDetail.created)"></dd>
+            <dt x-show="jobDetail.started">Started</dt><dd x-show="jobDetail.started" x-text="date(jobDetail.started)"></dd>
+            <dt x-show="jobDetail.finished">Finished</dt><dd x-show="jobDetail.finished" x-text="date(jobDetail.finished)"></dd>
+            <dt x-show="jobDetail.wandb">W&amp;B</dt><dd x-show="jobDetail.wandb"><a :href="jobDetail.wandb" target="_blank" rel="noopener" x-text="jobDetail.wandb"></a></dd>
+            <dt x-show="jobDetail.error">Error</dt><dd x-show="jobDetail.error" style="color:var(--red-text)" x-text="jobDetail.error"></dd>
+          </dl>
+          <details style="border-top:1px solid var(--border)"><summary class="small" style="padding:8px 16px; cursor:pointer">Arguments<span x-show="jobDetail.result"> and result</span></summary>
+            <pre class="json" x-text="JSON.stringify({args: jobDetail.args, result: jobDetail.result}, null, 2)"></pre></details>
+          <div class="panel-head" style="border-top:1px solid var(--border)"><h2>Log</h2><span class="small muted" x-text="(jobDetail.status === 'running' ? 'live · ' : '') + 'last 400 lines'"></span></div>
+          <pre class="log" x-ref="log" x-text="jobDetail.log || '(no output yet)'"></pre>
+        </div>
+      </template>
+      <div class="empty" x-show="!jobDetail"><svg class="ic xl"><use href="#i-list"/></svg><p>Choose a job for its log.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================================================== monitoring -->
+<section x-show="view === 'monitor'" class="page wide">
+  <div class="page-head">
+    <h1>Monitoring</h1>
+    <span class="live"><span class="dot"></span><span>Live, every 5 s</span></span>
+    <span class="lozenge moved" x-show="mon && mon.paused">worker paused</span>
+    <span class="grow"></span>
+    <div class="segmented"><template x-for="m in [5, 15, 60]" :key="m">
+      <button class="btn" :class="{on: minutes === m}" @click="minutes = m; loadMonitor()" x-text="m === 60 ? '1 h' : m + ' min'"></button></template></div>
+    <a class="btn subtle" href="/metrics" target="_blank" rel="noopener"><svg class="ic"><use href="#i-external"/></svg><span>/metrics</span></a>
+  </div>
+  <template x-if="mon">
+    <div>
+      <div class="dash">
+        <template x-for="tile in tiles()" :key="tile.key">
+          <div class="stat">
+            <div class="stat-head"><span class="stat-title" x-text="tile.title"></span><span class="stat-value" x-html="tile.value"></span></div>
+            <div class="chart" x-html="tile.chart"></div>
+            <div class="stat-note" x-text="tile.note"></div>
+          </div>
+        </template>
+      </div>
+      <div class="dash2">
+        <div class="panel">
+          <div class="panel-head"><h2>Jobs over the last 30 days</h2></div>
+          <table class="grid">
+            <thead><tr><th>Kind</th><th class="end">Runs</th><th class="end">Mean (done)</th><th class="end">Longest</th><th class="end">Failed</th><th class="end">Cancelled</th></tr></thead>
+            <tbody><template x-for="s in mon.stats" :key="s.kind + (s.task || '')">
+              <tr><td x-text="s.kind + (s.task ? ' ' + s.task : '')"></td><td class="num-cell" x-text="s.runs"></td>
+                <td class="num-cell" x-text="s.mean === null ? '—' : duration(s.mean)"></td><td class="num-cell" x-text="s.longest === null ? '—' : duration(s.longest)"></td>
+                <td class="end"><span class="lozenge" :class="s.failed ? 'removed' : ''" x-text="s.failed"></span></td><td class="num-cell" x-text="s.cancelled"></td></tr></template></tbody>
+          </table>
+          <div class="empty" x-show="!mon.stats.length"><p>No job in the last 30 days.</p></div>
+        </div>
+        <div class="stack">
+          <div class="panel">
+            <div class="panel-head"><h2>Workers</h2></div>
+            <table class="grid"><tbody><template x-for="w in mon.workers" :key="w.name">
+              <tr><td><span class="dot" :class="w.alive ? 'green' : 'red'"></span></td><td x-text="w.name"></td>
+                <td class="muted" x-text="w.job_id ? 'job #' + w.job_id : 'idle'"></td><td class="end muted" x-text="'seen ' + w.age + ' s ago'"></td></tr></template></tbody></table>
+            <div class="empty" x-show="!mon.workers.length" style="padding:24px"><p>No worker has started yet.</p></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h2>Running and queued</h2><span class="badge" x-text="mon.running.length"></span></div>
+            <table class="grid"><tbody><template x-for="j in mon.running" :key="j.id">
+              <tr class="clickable" @click="go('jobs/' + j.id)"><td class="mono" x-text="'#' + j.id"></td><td x-text="j.kind + (j.task ? ' ' + j.task : '')"></td>
+                <td><span class="lozenge" :class="lozenge(j.status)" x-text="j.status"></span></td><td class="num-cell" x-text="j.seconds === null ? '' : duration(j.seconds)"></td></tr></template></tbody></table>
+            <div class="empty" x-show="!mon.running.length" style="padding:24px"><p>Nothing running.</p></div>
+            <div class="small muted" style="padding:12px 16px; border-top:1px solid var(--border)" x-text="'App started ' + duration(mon.uptime) + ' ago'"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </template>
+</section>
+</div>
+
+<div class="lightbox" x-show="lightbox" @click="lightbox = null" @keydown.escape.window="lightbox = null"><img :src="lightbox || ''" alt=""></div>
+
+<div class="flags" aria-live="assertive">
+  <template x-for="toast in toasts" :key="toast.id">
+    <div class="flag" :class="toast.kind || 'info'" @click="toasts = toasts.filter(x => x.id !== toast.id)">
+      <svg class="ic l"><use :href="toast.kind === 'bad' ? '#i-error' : (toast.kind === 'ok' ? '#i-success' : '#i-info')"/></svg>
+      <span x-text="toast.text"></span>
+    </div>
+  </template>
+</div>
+</body>
+</html>

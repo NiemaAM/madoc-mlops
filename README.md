@@ -281,13 +281,38 @@ box "with the augmented train pages" (default from `params.yaml: <task>.use_augm
 augmentation of the version to the training (made with `params.yaml: augment` if there is none). The geometry of
 the lines follows the image, so the augmented pages serve blla as well as HTR. **Browse → augmented** shows them.
 
-### Browse
+### The app (`python -m mlops.web`)
 
-**Browse** shows the pages of a split (or the augmented ones), filtered by page type: the image with its line
-polygons (blue) and baselines (red, numbered), the transcription line by line, and the PageXML. Pages are shown by
-their id; **Show original names** (off by default, so a screenshot shows none) adds the original file name and the
-writer, and the search box finds a page by its original name in any split. The names stay in the app: never in a
-job log, W&B or a figure.
+A FastAPI app with one page (`mlops/web/static`, Alpine.js vendored, no build step, no CDN), in MaDoc's design:
+light, dark or the system's theme. Every long task is a job of the queue, so the app restarts at any time.
+
+| Page | What it does |
+|---|---|
+| **Pipeline** | the graph of the stages (export → ingest → normalise → edit → split → dataset version → augment → train → evaluate → release → MaDoc, and experiments), each with its numbers and the state of its last job (running stages move); click a stage to open it |
+| **Data** | upload, batches, dataset versions, vocabulary, writers, split, normalisation, augmentation, missing pages, preview |
+| **Editor** | the pages of a split (or the augmented ones, read only): edit the polygons and baselines (move, add / remove points, draw, rectangle, delete, undo), the text of each line, rotate (90° / 180° / 270°) and crop the image |
+| **Training**, **Evaluation**, **Experiments** | the forms of the jobs, the models, the evaluations with their intervals and the release (pull request), the figures |
+| **Jobs** | every job with its live log; cancel |
+| **Monitoring** | CPU, memory, GPU, GPU memory and temperature, queue, data disk (sampled every 5 s, the last hour), workers, jobs of the last 30 days; `/metrics` gives the same to Prometheus |
+
+`/healthz` answers without a login (Docker's healthcheck); everything else asks for one (`MLOPS_AUTH`).
+
+**Editing a page keeps every version of it.** The first change keeps the page as ingested (r0) in
+`data/revisions/<page>/`; every save, rotation, crop or restore is a new revision (who, when, what), and
+**History → Restore** brings back any of them as a new revision, so nothing is lost. The PageXML is rewritten in
+place (regions and line order kept), the typed text goes through the normalisation rules, points are kept inside
+the image. An edit:
+
+- changes the dataset digest (a page counts with its revision), so the next job makes a new dataset version and
+  the trainings already made keep theirs;
+- removes the augmented copies of that page (the next augmentation makes them again from the new revision);
+- reads the officer's name again (page 2) and moves the page if its writer changed;
+- is refused while a job reads the pages (ingest, augment, train, evaluate, experiments, normalisation, preview)
+  or when the page changed since it was opened (two people, two tabs).
+
+Pages are shown by their id; **Original names** (off by default, so a screenshot shows none) adds the original file
+name, and the search finds a page by it in any split. The names stay in the app: never in a job log, W&B or a
+figure.
 
 ### Writers, batches, missing pages, preview
 
@@ -337,26 +362,27 @@ x model heatmaps. W&B only receives numbers (tables), characters and anonymous w
 
 ### 8. The first cycle
 
-1. **Train**: "Train recognition (HTR)". The job appears in **Jobs**; its W&B link shows the curves live.
-   A training takes hours; the app can be closed meanwhile.
-2. **Evaluate**: choose the new model, "Evaluate against production". The current models of MaDoc have no card
+1. **Training**: "Train htr". The job appears in **Jobs** (and moves on the **Pipeline**); its W&B link shows the
+   curves live. A training takes hours; the app can be closed meanwhile.
+2. **Evaluation**: choose the new model, "Evaluate against production". The current models of MaDoc have no card
    yet, so this first evaluation compares on all the test pages without the old / new breakdown.
-3. **Compare & release**: choose the evaluation. If it says "Better", "Open a pull request on MaDoc".
+3. Click the evaluation. If it says "better", "Open a pull request on MaDoc".
 4. On GitHub: MaDoc's tests run on the pull request; **merge it** to deploy the model.
-5. Same for the segmentation ("Train segmentation (blla)").
+5. Same for the segmentation ("Train blla").
 
 ---
 
 ## Daily use
 
 1. Annotate in eScriptorium, export the document as **PageXML with images** (zip).
-2. **Data** tab: drop the zip, "Ingest". The batch shows what was added, per split, and what was rejected.
-3. **Train** the task that needs it (usually HTR after new transcriptions, blla after new layouts).
-4. **Evaluate**, then **Compare & release**, then merge on GitHub.
+2. **Data**: drop the zip, "Ingest". The batch shows what was added, per split, and what was rejected.
+3. **Editor**: fix the lines or the pages that need it (History restores any version).
+4. **Training**: train the task that needs it (usually HTR after new transcriptions, blla after new layouts).
+5. **Evaluation**: evaluate the candidate, open the pull request, then merge on GitHub.
 
-What to watch: in **Compare & release**, the gain on the *old* test pages (the model must not forget) and on the
-*new* ones (what the new data brought). In **Server**, the GPU memory during a training, and that the worker is
-"alive".
+What to watch: in **Evaluation**, the gain on the *old* test pages (the model must not forget) and on the *new*
+ones (what the new data brought). In **Monitoring**, the GPU memory during a training, and that the worker is
+"alive". **Pipeline** shows where everything stands.
 
 ## Operations
 
@@ -445,7 +471,10 @@ madoc-mlops/
 ├── params.yaml               the settings
 ├── .env.example              the secrets to fill in .env
 ├── mlops/
-│   ├── ui.py                 the control app
+│   ├── web/                  the control app (FastAPI): api.py the routes, views.py the data of the pages,
+│   │                         monitor.py the resources sampler and /metrics, static/ the interface
+│   ├── editing.py            editing a page: lines, rotation, crop, revisions, restore
+│   ├── ui.py                 the former control app (Gradio), kept as a fallback
 │   ├── worker.py             the job loop, heartbeat, cancellation
 │   ├── jobs.py               the queue (PostgreSQL, SKIP LOCKED) and the job logs
 │   ├── ingest.py             checks, pseudonymisation, placement by writer (or group), held-out set
@@ -462,7 +491,7 @@ madoc-mlops/
 │   ├── settings.py           the options chosen in the app (training, split), on top of params.yaml
 │   ├── normalize.py          the replacement of invisible / look-alike characters
 │   ├── splitting.py          the placement of the groups, balanced on the characters and page types
-│   ├── browse.py             the Browse tab (pages by split, lines drawn, PageXML)
+│   ├── browse.py             page types, the pages of a split (Editor list, Gradio Browse tab)
 │   ├── vocabulary.py         the characters of the dataset (Data tab)
 │   ├── datasets.py           dataset versions
 │   ├── augment.py            augmentation of the train pages of a version (augment job)
