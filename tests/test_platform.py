@@ -1242,7 +1242,8 @@ def test_figures():
 
 def test_crossval_by_writer_and_the_full_pipeline(env, madoc_remote, monkeypatch):
     """Kraken trained per writer fold (fake ketos), the folds' test pages read (fake kraken), names and CER pooled
-    with intervals by writer, figures made; then a segmentation + recognition pair on the page-2 test pages."""
+    with intervals by writer, figures made, the full pipeline scored on pages 1 and 2; then a segmentation +
+    recognition pair on the page-2 test pages."""
     from mlops import crossval, db, jobs, worker
     for module in ("mlops.crossval", "mlops.train", "mlops.evaluate"):
         monkeypatch.setattr(f"{module}.free_gpu", lambda log=print: None, raising=False)
@@ -1267,6 +1268,9 @@ def test_crossval_by_writer_and_the_full_pipeline(env, madoc_remote, monkeypatch
         assert s["metrics"]["cer"] == 0.0 and s["names"]["all"]["exact"] == 100.0   # the fake candidate reads all
         assert set(s["spread"]) >= {"cer"} and s["spread"]["cer"]["sd"] == 0.0       # two seeds
         assert s["pipeline"]["e2e_cer"] is not None and s["pipeline"]["recall"] == 1.0
+        by_type = s["pipeline"]["by_type"]                      # pages 1 and 2, each with its own numbers
+        assert set(by_type) == {"1", "2"} and sum(t["pages"] for t in by_type.values()) == len(pages)
+        assert all(t["recall"] == 1.0 and t["e2e_cer"] is not None for t in by_type.values())
         figures = {p.stem for p in Path(cv["figures"]).glob("*.png")}
         assert {"training_curves", "error_composition", "names_cer", "form_rows", "writers", "e2e_breakdown",
                 "writers_cer"} <= figures

@@ -15,8 +15,8 @@ are never used here (they stay for the final test). Several seeds: every fold is
 results give the mean and the standard deviation over the seeds.
 
 Per fold: the names (page 1 and page 2), the CER with and without spaces and punctuation, per writer; with
-"segmentation" (kraken only), a segmentation model is trained on the same fold and the full pipeline is scored
-on the page-2 test pages. The pooled result (all folds), its intervals by writer and its figures are saved in the
+"segmentation" (kraken only), a segmentation model is trained on the same fold (pages 1 and 2) and the full
+pipeline is scored on all its test pages, pages 1 and 2, with the result of each page type. The pooled result (all folds), its intervals by writer and its figures are saved in the
 table experiments; the curves of every fold are in W&B (one group per experiment).
 """
 
@@ -130,6 +130,14 @@ def train_kraken(conn, task, settings, fold, version, out, log, should_stop, gro
     return trained["model_path"], trained["epochs"], trained["peak_memory_mib"]
 
 
+def lines_found(detections):
+    """Line precision and recall of a list of detection totals."""
+    true = sum(d["true_lines"] for d in detections)
+    predicted = sum(d["predicted_lines"] for d in detections)
+    matched = sum(d["matched_lines"] for d in detections)
+    return {"precision": matched / predicted if predicted else 0.0, "recall": matched / true if true else 0.0}
+
+
 def run_fold(conn, job, fold, version, recognizer, settings, seed, out, log, should_stop, group, with_segmentation):
     """Train on the fold, read its test pages -> {"rows", "epochs", "pipeline": {...} or None}."""
     out.mkdir(parents=True, exist_ok=True)
@@ -142,10 +150,14 @@ def run_fold(conn, job, fold, version, recognizer, settings, seed, out, log, sho
         if with_segmentation:
             seg, _, _ = train_kraken(conn, "blla", settings["blla"], fold, version, out / "blla", log, should_stop,
                                      group, job["id"], seed)
-            page_two = [r for r in fold["test"] if r["page_type"] == "2"] or fold["test"]
-            rows, detected = pipeline(seg, model, page_two, out / "pipeline", log, should_stop)
+            # every test page, page 1 and page 2 (the segmentation is trained on both); the detection is also
+            # counted per page type
+            rows, detected = pipeline(seg, model, fold["test"], out / "pipeline", log, should_stop)
+            types = {r["id"]: r["page_type"] for r in fold["test"]}
             result["pipeline"] = {"rows": rows, "detection": detection_totals(detected),
-                                  "pages": [r["id"] for r in page_two]}
+                                  "by_type": {t: detection_totals({p: d for p, d in detected.items() if types[p] == t})
+                                              for t in sorted(set(types.values()))},
+                                  "pages": [r["id"] for r in fold["test"]]}
     else:
         import wandb
         from mlops.baselines import run_recognizer
@@ -197,7 +209,7 @@ def crossval(conn, job, log, should_stop, set_wandb_url):
     all_meta = meta(conn, [r for f in folds for r in f["test"]])
     per_seed, curves, pipelines, memory = {}, [], [], []
     for seed in seeds:
-        rows, pipeline_rows, detections, pipeline_pages = [], [], [], []
+        rows, pipeline_rows, detections, pipeline_pages, typed = [], [], [], [], defaultdict(list)
         for fold in folds:
             log(f'--- {fold["name"]} (seed {seed})')
             result = run_fold(conn, job, fold, version, recognizer, settings, seed,
@@ -209,19 +221,20 @@ def crossval(conn, job, log, should_stop, set_wandb_url):
             if result["pipeline"]:
                 pipeline_rows += result["pipeline"]["rows"]
                 detections.append(result["pipeline"]["detection"])
+                for page_type, counts in result["pipeline"]["by_type"].items():
+                    typed[page_type].append(counts)
                 pipeline_pages += result["pipeline"]["pages"]
         (out / f"s{seed}").mkdir(parents=True, exist_ok=True)
         (out / f"s{seed}" / "lines.json").write_text(json.dumps(rows, ensure_ascii=False), encoding="utf-8")
         per_seed[seed] = score(rows, all_meta, recognizer)
         if pipeline_rows:
             e2e = score(pipeline_rows, {p: all_meta[p] for p in pipeline_pages}, recognizer)
-            gt = cer_of(per_seed[seed], "2")
-            true = sum(d["true_lines"] for d in detections)
-            predicted = sum(d["predicted_lines"] for d in detections)
-            matched = sum(d["matched_lines"] for d in detections)
-            pipelines.append({"seed": seed, "e2e": e2e, "gt_cer": gt,
-                              "precision": matched / predicted if predicted else 0.0,
-                              "recall": matched / true if true else 0.0})
+            # the same pages read from their true lines: what the segmentation adds is the difference
+            pipelines.append({"seed": seed, "e2e": e2e, "gt_cer": cer_of(per_seed[seed]), **lines_found(detections),
+                              "by_type": {t: {"e2e_cer": cer_of(e2e, t), "gt_cer": cer_of(per_seed[seed], t),
+                                              "pages": sum(1 for p in pipeline_pages if all_meta[p]["page_type"] == t),
+                                              **lines_found(counts)}
+                                          for t, counts in sorted(typed.items())}})
     first = per_seed[seeds[0]]
     metrics = flat_metrics(first)
     spread = {}
@@ -241,7 +254,7 @@ def crossval(conn, job, log, should_stop, set_wandb_url):
         p = pipelines[0]
         summary["pipeline"] = {"e2e_cer": p["e2e"]["metrics"]["cer"], "e2e_ci": p["e2e"]["ci"]["cer"],
                                "gt_cer": p["gt_cer"], "precision": p["precision"], "recall": p["recall"],
-                               "names": p["e2e"]["names"]}
+                               "names": p["e2e"]["names"], "by_type": p["by_type"], "pages": "1 and 2"}
     figures = out / "figures"
     try:
         from mlops.eval_charts import summary_figures

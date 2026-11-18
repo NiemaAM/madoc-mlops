@@ -144,7 +144,7 @@ def summary_figures(summaries, folder, pipelines=None, prefix=""):
              "Writer x model CER heatmap (writers anonymised)")
     if pipelines:
         keep(charts.e2e_breakdown(pipelines), "e2e_breakdown",
-             "End-to-end breakdown (page 2): CER on the true lines, what segmentation adds; line detection")
+             "End-to-end breakdown: CER on the true lines, what segmentation adds; line detection")
     return saved
 
 
