@@ -716,7 +716,7 @@
         <label class="field"><span>Pages</span><select x-model="xf.scheme"><option value="writers">cross-validation by writer</option><option value="split">the dataset's split</option></select></label>
         <label class="field"><span>Seeds</span><input type="text" x-model="xf.seeds" placeholder="1,2,3"><span class="help">several: every fold trained once per seed, mean ± sd</span></label>
         <label class="field wide"><span>Options (JSON)</span><input type="text" class="mono" x-model="xf.options" placeholder='kraken: {"lag": 10}; crnn: {"epochs": 100}; qwen: {"epochs": 2}'></label>
-        <label class="field check" x-show="xf.recognizer === 'kraken'"><input type="checkbox" x-model="xf.segmentation"><span>Also train the segmentation per fold (end to end, page 2)</span></label>
+        <label class="field check" x-show="xf.recognizer === 'kraken'"><input type="checkbox" x-model="xf.segmentation"><span>Also train the segmentation per fold (end to end, pages 1 and 2)</span></label>
       </div>
       <div class="actions-row"><span class="grow"></span><button class="btn primary" @click="runExperiment()"><svg class="ic"><use href="#i-play"/></svg><span>Run</span></button></div>
     </div>
@@ -752,7 +752,9 @@
                 <td class="num-cell" x-text="n.exact"></td><td class="num-cell" x-text="n.normalized"></td><td class="num-cell" x-text="n.cer"></td></tr></template></tbody>
             </table>
             <div class="message info" x-show="experimentDetail.pipeline"><svg class="ic l"><use href="#i-flow"/></svg>
-              <div x-text="experimentDetail.pipeline ? 'End to end (page 2): CER ' + num(experimentDetail.pipeline.e2e_cer) + ' % (true lines ' + num(experimentDetail.pipeline.gt_cer) + ' %), line precision ' + num(experimentDetail.pipeline.precision, 3) + ', recall ' + num(experimentDetail.pipeline.recall, 3) : ''"></div></div>
+              <div style="flex:1"><div x-text="experimentDetail.pipeline ? 'End to end (' + (experimentDetail.pipeline.pages ? 'pages ' + experimentDetail.pipeline.pages : 'page 2') + '): CER ' + num(experimentDetail.pipeline.e2e_cer) + ' % (true lines ' + num(experimentDetail.pipeline.gt_cer) + ' %), line precision ' + num(experimentDetail.pipeline.precision, 3) + ', recall ' + num(experimentDetail.pipeline.recall, 3) : ''"></div>
+                <template x-for="(t, k) in (experimentDetail.pipeline && experimentDetail.pipeline.by_type ? experimentDetail.pipeline.by_type : {})" :key="k">
+                  <div class="small" x-text="'Page ' + k + ' (' + t.pages + ' pages): CER ' + num(t.e2e_cer) + ' % (true lines ' + num(t.gt_cer) + ' %), precision ' + num(t.precision, 3) + ', recall ' + num(t.recall, 3)"></div></template></div></div>
             <table class="grid" x-show="experimentDetail.folds.length">
               <thead><tr><th>Fold</th><th>Writers</th><th class="end">Test</th><th class="end">Train</th><th class="end">Val</th></tr></thead>
               <tbody><template x-for="f in experimentDetail.folds" :key="f.name"><tr><td x-text="f.name"></td><td class="mono small" x-text="(f.writers || []).join(', ')"></td>
